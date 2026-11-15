@@ -1,0 +1,12 @@
+# scan output and anything that could hold a secret - never commit these
+mcscan-*.json
+*.env
+.env*
+!.env.example
+*.pem
+*.key
+secrets*
+.supabase/
+supabase/.temp/
+supabase/.branches/
+node_modules/
