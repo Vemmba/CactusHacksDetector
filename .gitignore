@@ -10,3 +10,4 @@ secrets*
 supabase/.temp/
 supabase/.branches/
 node_modules/
+supabase/migration_*.sql
