@@ -47,14 +47,12 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
-
 namespace CactusHacksDetector
 {
     public class KeyPair
     {
         public string Name; public int Key; public string Owner; public string Desc; public string Method;
     }
-
     public class ClassInfo
     {
         public bool Ok; public string Error; public int Major; public string ThisClass; public int BadCode;
@@ -62,7 +60,6 @@ namespace CactusHacksDetector
         public List<string> Caps = new List<string>();
         public List<KeyPair> Keys = new List<KeyPair>();
     }
-
     internal class Pool
     {
         public int[] Tag; public int[] A; public int[] C; public string[] Utf;
@@ -75,13 +72,10 @@ namespace CactusHacksDetector
             desc = Utf[C[nt]];
         }
     }
-
     public static class ClassAnalyzer
     {
         private class Ev { public int Idx; public bool IsStr; public int Val; public string S; }
-
         private static readonly int[] OpLen = BuildLen();
-
         private static int[] BuildLen()
         {
             int[] l = new int[256];
@@ -102,10 +96,8 @@ namespace CactusHacksDetector
             l[0xc8] = 5; l[0xc9] = 5;
             return l;
         }
-
         private static int U2(byte[] b, int p) { return (b[p] << 8) | b[p + 1]; }
         private static int S4(byte[] b, int p) { return (b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]; }
-
         public static ClassInfo Analyze(byte[] b)
         {
             ClassInfo ci = new ClassInfo();
@@ -128,12 +120,11 @@ namespace CactusHacksDetector
                     else if (t == 15) { p += 3; }
                     else { ci.Error = "bad constant pool tag " + t; return ci; }
                 }
-                p += 2;                                   // access flags
+                p += 2;
                 int thisIdx = U2(b, p); p += 2;
-                p += 2;                                   // super class
+                p += 2;
                 ci.ThisClass = pool.ClassName(thisIdx);
-                int ic = U2(b, p); p += 2 + 2 * ic;       // interfaces
-
+                int ic = U2(b, p); p += 2 + 2 * ic;
                 HashSet<string> caps = new HashSet<string>();
                 for (int i = 1; i < n; i++)
                 {
@@ -147,7 +138,6 @@ namespace CactusHacksDetector
                     }
                 }
                 ci.Caps.AddRange(caps);
-
                 int fc = U2(b, p); p += 2;
                 for (int f = 0; f < fc; f++)
                 {
@@ -175,7 +165,6 @@ namespace CactusHacksDetector
             catch (Exception ex) { ci.Error = "parse error: " + ex.Message; }
             return ci;
         }
-
         private static void AddCaps(HashSet<string> caps, string o, string nm)
         {
             if (o == "java/lang/Runtime" && nm == "exec") caps.Add("exec");
@@ -206,7 +195,6 @@ namespace CactusHacksDetector
             if (o.StartsWith("org/lwjgl/glfw/GLFW") || o.StartsWith("com/mojang/blaze3d/platform/InputConstants")
                 || o.StartsWith("net/minecraft/client/util/InputUtil")) caps.Add("glfw");
         }
-
         private static List<Ev> Trim(List<Ev> ev, int idx)
         {
             List<Ev> r = new List<Ev>();
@@ -214,7 +202,6 @@ namespace CactusHacksDetector
             if (r.Count > 64) r = r.GetRange(r.Count - 32, 32);
             return r;
         }
-
         private static void DetectKey(List<Ev> ev, int idx, string owner, string desc, string mname, ClassInfo ci)
         {
             if (ci.Keys.Count >= 200 || ev.Count == 0 || desc == null) return;
@@ -252,7 +239,6 @@ namespace CactusHacksDetector
                 }
             }
         }
-
         private static void ScanCode(byte[] b, int start, int clen, Pool pool, string mname, ClassInfo ci)
         {
             int pc = 0; int idx = 0;
@@ -275,7 +261,6 @@ namespace CactusHacksDetector
                 }
                 else if (op == 0xc4) { ln = (b[start + pc + 1] == 0x84) ? 6 : 4; }
                 if (ln <= 0 || pc + ln > clen) { ci.BadCode++; return; }
-
                 if (op >= 0x02 && op <= 0x08) { Ev e = new Ev(); e.Idx = idx; e.IsStr = false; e.Val = op - 3; ev.Add(e); }
                 else if (op == 0x10) { Ev e = new Ev(); e.Idx = idx; e.IsStr = false; e.Val = unchecked((sbyte)b[start + pc + 1]); ev.Add(e); }
                 else if (op == 0x11) { Ev e = new Ev(); e.Idx = idx; e.IsStr = false; e.Val = unchecked((short)U2(b, start + pc + 1)); ev.Add(e); }
@@ -306,7 +291,6 @@ namespace CactusHacksDetector
             if (pc != clen) ci.BadCode++;
         }
     }
-
     public static class Util
     {
         public static double Entropy(byte[] b)
@@ -324,15 +308,11 @@ namespace CactusHacksDetector
             return h;
         }
     }
-
     public class MemResult
     {
         public bool Ok; public string Error; public long BytesScanned; public int Regions; public bool TimedOut;
         public Dictionary<string, int> Hits = new Dictionary<string, int>();
     }
-
-    // Read-only scan of another process's private memory for a list of ASCII terms (case-insensitive).
-    // Only term hit counts leave this function - memory contents are never copied out or stored.
     public static class MemScan
     {
         [StructLayout(LayoutKind.Sequential)]
@@ -341,7 +321,6 @@ namespace CactusHacksDetector
             public IntPtr BaseAddress; public IntPtr AllocationBase; public uint AllocationProtect;
             public IntPtr RegionSize; public uint State; public uint Protect; public uint Type;
         }
-
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -350,7 +329,6 @@ namespace CactusHacksDetector
         private static extern UIntPtr VirtualQueryEx(IntPtr h, IntPtr addr, out MBI mbi, UIntPtr len);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, UIntPtr size, out UIntPtr read);
-
         private static void SearchBuf(byte[] buf, int have, int startLimit, byte[][] pats, int[] head, int[] nxt, byte[] lo, Dictionary<string, int> hits, string[] terms)
         {
             int limit = Math.Min(startLimit, have - 1);
@@ -376,7 +354,6 @@ namespace CactusHacksDetector
                 }
             }
         }
-
         public static MemResult Scan(int pid, string[] terms, int maxSeconds, long maxBytes)
         {
             MemResult r = new MemResult();
@@ -401,16 +378,13 @@ namespace CactusHacksDetector
                     nxt[i] = head[key]; head[key] = i;
                 }
                 if (maxLen == 0) { r.Error = "no usable terms"; return r; }
-
-                h = OpenProcess(0x0410, false, pid);          // QUERY_INFORMATION | VM_READ
+                h = OpenProcess(0x0410, false, pid);
                 if (h == IntPtr.Zero) { r.Error = "cannot open process (try running as Administrator)"; return r; }
-
                 DateTime deadline = DateTime.UtcNow.AddSeconds(maxSeconds);
                 int overlap = maxLen - 1; int chunk = 1 << 20;
                 byte[] buf = new byte[chunk + overlap];
                 long addr = 0; long maxAddr = 0x7FFFFFFFFFFF;
                 UIntPtr mbiSize = new UIntPtr((uint)Marshal.SizeOf(typeof(MBI)));
-
                 while (addr < maxAddr)
                 {
                     MBI mbi;
@@ -651,18 +625,20 @@ function Get-HackKind([string]$Name, [string]$Cat) {
 
 $Sig = @{
 
-    Clients = '(?i)(liquid[-_ ]?bounce|meteor[-_ ]?client|meteordevelopment|(?<![a-z])wurst(?:[-_ ]?client)?(?![a-z])|net/wurstclient|aristois|impact[-_ ]?client|future[-_ ]?client|rusher[-_ ]?hack|thunder[-_ ]?hack|pandaware|(?<![a-z])asteria(?![a-z])|(?<![a-z])xenon[-_ ]?client|vape[-_ ]?(?:v4|lite|client)|(?<![a-z])vapev4|doomsday[-_ ]?client|prestige[-_ ]?client|(?<![a-z])konas(?![a-z])|3arthh4ck|salhack|bleach[-_ ]?hack|coffee[-_ ]?client|inertia[-_ ]?client|sigma[-_ ]?client|novoline|exhibition[-_ ]?client|astolfo|raven[-_ ]?b[0-9s]|lunar[-_ ]?cheat|fdp[-_ ]?client|(?<![a-z])nodus(?![a-z])|kami[-_ ]?blue|forgehax|tenacity[-_ ]?client|rise[-_ ]?client|slinky[-_ ]?client|moonlight[-_ ]?client|zeroday[-_ ]?client|dortware|hanabi[-_ ]?client|augustus[-_ ]?client|trollhack|gamesense[-_ ]?client|xulu[-_ ]?client|cosmos[-_ ]?client|boze[-_ ]?client|opai[-_ ]?client)'
+    Clients = '(?i)(liquid[-_ ]?bounce|meteor[-_ ]?client|meteordevelopment|(?<![a-z])wurst(?:[-_ ]?client)?(?![a-z])|net/wurstclient|aristois|impact[-_ ]?client|future[-_ ]?client|rusher[-_ ]?hack|thunder[-_ ]?hack|pandaware|(?<![a-z])asteria(?![a-z])|(?<![a-z])xenon[-_ ]?client|vape[-_ ]?(?:v4|lite|client)|(?<![a-z])vapev4|doomsday[-_ ]?client|prestige[-_ ]?client|(?<![a-z])konas(?![a-z])|3arthh4ck|salhack|bleach[-_ ]?hack|coffee[-_ ]?client|inertia[-_ ]?client|sigma[-_ ]?client|novoline|exhibition[-_ ]?client|astolfo|raven[-_ ]?b[0-9s]|lunar[-_ ]?cheat|fdp[-_ ]?client|(?<![a-z])nodus(?![a-z])|kami[-_ ]?blue|forgehax|tenacity[-_ ]?client|rise[-_ ]?client|slinky[-_ ]?client|moonlight[-_ ]?client|zeroday[-_ ]?client|dortware|hanabi[-_ ]?client|augustus[-_ ]?client|trollhack|gamesense[-_ ]?client|xulu[-_ ]?client|cosmos[-_ ]?client|boze[-_ ]?client|opai[-_ ]?client|cat[-_ ]?lean|argon[-_ ]?client|gypsy[-_ ]?client|virgin[-_ ]?client|grim[-_ ]?client|nova[-_ ]?client|(?<![a-z])hellion(?![a-z])|dqrkis|lvstrng|vape\.gg|intent\.store|rise\.today|club[/.]maxstats|wtf[/.]moonlight|me[/.]zeroeightsix|net[/.]ccbluex|today[/.]opai|com[/.]alan[/.]clients|dev[.]gambleclient|xyz[/.]greaj|(?:dev|skid)[/.]krypton)'
 
-    Modules = '(?i)(kill[-_]?aura|crystal[-_]?aura|auto[-_]?crystal|trigger[-_]?bot|aim[-_]?(?:assist|bot)|silent[-_]?aim|anchor[-_]?macro|auto[-_]?(?:totem|clicker|pearl|armor|anchor|sword|pot)|no[-_]?(?:knockback|fall|slow)|fly[-_]?hack|speed[-_]?hack|x[-_]?ray[-_]?hack|player[-_]?esp|chest[-_]?(?:esp|steal)|cheststealer|fast[-_]?(?:place|break)|scaffold(?!ing)|hitbox(?:es)?[-_]?(?:expand|hack)|reach[-_]?(?:hack|extend)|velocity[-_]?(?:hack|cancel)|bunny[-_]?hop|jesus[-_]?hack|bed[-_]?aura|jitter[-_]?click(?:er)?|auto[-_]?hit|hit[-_]?select|w[-_]?tap)'
+    Modules = '(?i)(kill[-_]?aura|crystal[-_]?aura|auto[-_]?crystal|trigger[-_]?bot|aim[-_]?(?:assist|bot)|silent[-_]?aim|anchor[-_]?macro|auto[-_]?(?:totem|clicker|pearl|armor|anchor|sword|pot)|no[-_]?(?:knockback|fall|slow)|fly[-_]?hack|speed[-_]?hack|x[-_]?ray[-_]?hack|player[-_]?esp|chest[-_]?(?:esp|steal)|cheststealer|fast[-_]?(?:place|break)|scaffold(?!ing)|hitbox(?:es)?[-_]?(?:expand|hack)|reach[-_]?(?:hack|extend)|velocity[-_]?(?:hack|cancel)|bunny[-_]?hop|jesus[-_]?hack|bed[-_]?aura|jitter[-_]?click(?:er)?|auto[-_]?hit|hit[-_]?select|w[-_]?tap|auto[-_]?(?:double[-_]?hand|dtap|neth[-_]?pot|tpa|firework|breach|inventory[-_]?totem)|stun[-_]?slam|(?:mace|spear|elytra)[-_]?swap|shield[-_]?(?:breaker|disabler)|axe[-_]?spam|web[-_]?macro|key[-_]?pearl|(?:hover|legit)[-_]?totem|ping[-_]?spoof|anti[-_]?miss[-_]?click|lag[-_]?reach|pop[-_]?switch|sprint[-_]?reset|fake[-_]?inv(?![a-z])|pack[-_]?spoof|(?<![a-z])(?:double|safe|air)[-_]?anchor|anchor[-_]?aura|loot[-_]?yeeter|walsk?y[-_]?(?:crystal[-_]?)?optimizer|grim[-_]?(?:velocity|disabler)|target[-_]?strafe|(?:boat|packet)[-_]?fly)'
 
     ModulesWeakLeaf = '(?i)^(esp|xray|fullbright|nametags|fly|speed|reach|velocity|criticals|antiknockback|autosprint|step|phase|blink|nofall|freecam|tracers|nuker|timer|sneak|spider|jesus|longjump|highjump|airjump|waterwalk|strafe|bhop|safewalk|antikb|hitboxes|aimassist|killaura|triggerbot|autoclicker)(module|hack|mod)?$'
     Bypass  = '(?i)(grim[-_]?bypass|vulcan[-_]?bypass|watchdog[-_]?bypass|matrix[-_]?bypass|nocheat[-_]?bypass|anticheat[-_]?bypass|hypixel[-_]?bypass|spartan[-_]?bypass|verus[-_]?bypass|intave[-_]?bypass)'
 
-    Markers = '(?i)(org[/.]chainlibs|LicenseCheckMixin|phantom-refmap|cheat-refmap)'
+    Markers = '(?i)(org[/.]chainlibs|LicenseCheckMixin|phantom-refmap|cheat-refmap|client-refmap|aHR0cDovL2FwaS5ub3ZhY2xpZW50LmxvbC93ZWJob29rLnR4dA|api\.novaclient\.lol|dqrkis\.xyz)'
 
     Libs    = '(?i)(jnativehook|imgui[./]binding|imgui[./]glfw)'
 
-    Obfuscators = '(?i)(ALLATORI|(?<![a-z])ZKM[0-9A-Za-z]*|Zelix|Stringer(?:Java)?Obfuscator|com[/.]licel|paramorphism|skidfuscator|itzsomebody|branchlock|com[/.]preemptive|caesium|binscure|(?<![a-z])jnic(?![a-z])|qprotect|superblaze|bozar)'
+    Labels  = '(?i)(place chance|break chance|stop on kill|explode delay|explode chance|glowstone delay|glowstone chance|activates above|click simulation|silent rotations|anchor macro|totem slot|strict one-tick|mace priority|horizontal aim speed|vertical aim speed|no count glitch|only charge|require hold axe|min totems|min pearls|totem first|drop interval|stay open for|predict crystals|particle chance)'
+
+    Obfuscators = '(?i)(ALLATORI|(?<![a-z])ZKM[0-9A-Za-z]*|Zelix|Stringer(?:Java)?Obfuscator|com[/.]licel|paramorphism|skidfuscator|itzsomebody|branchlock|com[/.]preemptive|caesium|binscure|(?<![a-z])jnic(?![a-z])|qprotect|superblaze|bozar|superblaubeere|scuti[-_.]?obf|smoke[-_.]?obf)'
 
     Malware = @(
         @{ Rule='Discord webhook';          Sev='high';   Rx='(?i)discord(app)?\.com/api/webhooks/' }
@@ -682,6 +658,7 @@ $Sig = @{
         @{ Rule='fractureiser IOC';         Sev='high';   Rx='(?i)85\.217\.144\.130|dev[/.]neko[/.]nekoclient|libWebGL64|\.ref\b[\s\S]{0,20}lib\.jar' }
         @{ Rule='Keylogger / screen grab';  Sev='high';   Rx='(?i)SetWindowsHookEx|GetAsyncKeyState|keylog|java[./]awt[./]Robot[\s\S]{0,80}createScreenCapture' }
         @{ Rule='Reverse shell';            Sev='high';   Rx='(?i)reverse[-_ ]?shell' }
+        @{ Rule='Token / session grabber';  Sev='high';   Rx='(?i)session[-_]?stealer|token[-_]?(?:logger|grabber)' }
         @{ Rule='Analysis-tool detection';  Sev='medium'; Rx='(?i)x64dbg|wireshark|processhacker|ollydbg|cheat ?engine' }
         @{ Rule='VM / sandbox detection';   Sev='low';    Rx='(?i)vboxservice|sandboxie|vmtoolsd' }
         @{ Rule='IP lookup / exfil';        Sev='medium'; Rx='(?i)api\.ipify\.org|ip-api\.com|checkip\.amazonaws\.com|ipinfo\.io' }
@@ -690,14 +667,12 @@ $Sig = @{
         @{ Rule='Manifest loads an external jar'; Sev='medium'; Rx='(?i)Class-Path:\s*(https?:|[A-Za-z]:[\\/]|/)' }
     )
 
-    FakeIds = @('sodium','lithium','iris','fabric-api','fabric','modmenu','optifine','starlight','phosphor','ferritecore','entityculling','indium','lazydfu','krypton','memoryleakfix')
+    FakeIds = @('sodium','lithium','iris','fabric-api','fabric','modmenu','optifine','starlight','phosphor','ferritecore','entityculling','indium','lazydfu','krypton','memoryleakfix','c2me-fabric','smoothboot-fabric','immediatelyfast','noisium','threadtweak')
 }
 $Rx = @{}
-foreach ($k in 'Clients', 'Modules', 'ModulesWeakLeaf', 'Bypass', 'Markers', 'Libs', 'Obfuscators') { $Rx[$k] = New-Object Regex($Sig[$k], 'Compiled') }
+foreach ($k in 'Clients', 'Modules', 'ModulesWeakLeaf', 'Bypass', 'Markers', 'Libs', 'Obfuscators', 'Labels') { $Rx[$k] = New-Object Regex($Sig[$k], 'Compiled') }
 $MalwareRx = foreach ($m in $Sig.Malware) { [pscustomobject]@{ Rule = $m.Rule; Sev = $m.Sev; Rx = (New-Object Regex($m.Rx, 'Compiled')) } }
 
-# Mod policy. Banned = never allowed. Suspect = only allowed if staff approves it (it is reviewed, not an automatic cheat).
-# Keys are mod ids / names / file stems with everything except a-z0-9 removed. Matching is hash first (Modrinth title), then mod id, then name, then file name.
 $BannedMods = [ordered]@{
     'autoclicker' = 'Auto Clicker'
     'autoclickermod' = 'Auto Clicker'
@@ -849,6 +824,30 @@ $BannedMods = [ordered]@{
     'autoarmor' = 'Auto Armor'
     'criticals' = 'Criticals'
     'nokb' = 'No Knockback'
+    'catlean' = 'Catlean Client'
+    'catleanclient' = 'Catlean Client'
+    'argonclient' = 'Argon Client'
+    'gypsyclient' = 'Gypsy Client'
+    'virginclient' = 'Virgin Client'
+    'grimclient' = 'Grim Client'
+    'novaclient' = 'Nova Client'
+    'hellionclient' = 'Hellion Client'
+    'hellion' = 'Hellion Client'
+    'autodoublehand' = 'Auto Double Hand'
+    'autodtap' = 'Auto Dtap'
+    'autonethpot' = 'Auto Neth Pot'
+    'autopotrefill' = 'Auto Pot Refill'
+    'stunslam' = 'Stun Slam'
+    'maceswap' = 'Mace Swap'
+    'keypearl' = 'Key Pearl'
+    'webmacro' = 'Web Macro'
+    'shielddisabler' = 'Shield Disabler'
+    'shieldbreaker' = 'Shield Breaker'
+    'hovertotem' = 'Hover Totem'
+    'legittotem' = 'Legit Totem'
+    'autoinventorytotem' = 'Auto Inventory Totem'
+    'pingspoof' = 'Ping Spoof'
+    'walksyoptimizer' = 'Walksy Optimizer'
 }
 $SuspectMods = [ordered]@{
     'litematica' = 'Litematica'
@@ -995,9 +994,6 @@ function ConvertTo-ModKey([string]$Text) {
     return ($Text.ToLowerInvariant() -replace '[^a-z0-9]', '')
 }
 
-# Returns @{ Kind = 'banned' | 'suspect'; Name = <list name> } or $null.
-# Order: Modrinth project title (found by the file hash, so renaming the jar does not help), then the mod id / name inside the jar, then the file name.
-# Banned is checked before suspect.
 function Find-PolicyKey($Table, $SortedKeys, [string[]]$Keys) {
     foreach ($key in $Keys) {
         if ($Table.Contains($key)) { return [string]$Table[$key] }
@@ -1172,6 +1168,7 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
     $weak = @{}
     $majors = @{}
     $magicBudget = 3000
+    $labelHits = @{}
 
     foreach ($metaName in 'fabric.mod.json', 'META-INF/jarjar/metadata.json') {
         $me = $Zip.GetEntry($metaName)
@@ -1317,10 +1314,11 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
             $seen["sMarkers|$($mk.Value.ToLower())"] = $true
             $findings.Add((New-Finding 'high' 'cheat-string' 'Hack-client marker string' "'$($mk.Value)' inside file" $where))
         }
+        foreach ($lm in $Rx.Labels.Matches($text)) { $labelHits[$lm.Value.ToLower()] = $true }
         $ob = $Rx.Obfuscators.Match($text)
         if ($ob.Success -and -not $seen['obf']) { $seen['obf'] = $true; $findings.Add((New-Finding 'medium' 'obfuscation' 'Obfuscator fingerprint' "'$($ob.Value)' inside file" $where)) }
         $fw = $FullwidthRx.Match($text)
-        if ($fw.Success -and -not $seen['fullwidth'] -and ((Decode-Fullwidth $fw.Value) -cmatch '[A-Za-z].*[A-Za-z].*[A-Za-z]')) {   # fullwidth punctuation / kana in lang files is normal; a hidden module NAME decodes to Latin letters
+        if ($fw.Success -and -not $seen['fullwidth'] -and ((Decode-Fullwidth $fw.Value) -cmatch '[A-Za-z].*[A-Za-z].*[A-Za-z]')) {
             $seen['fullwidth'] = $true
             $decoded = Decode-Fullwidth $fw.Value
             $findings.Add((New-Finding 'high' 'cheat-string' 'Fullwidth Unicode label (hides module names)' "decodes to '$decoded'" $where))
@@ -1347,6 +1345,10 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
                 }
             }
         }
+    }
+
+    if ($labelHits.Count -ge 4) {
+        $findings.Add((New-Finding 'high' 'cheat-string' 'Cheat module setting labels' ((@($labelHits.Keys) | Select-Object -First 6) -join ', ') $Label))
     }
 
     if ($weak.Count -ge 3) {
@@ -1478,7 +1480,6 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
 
     $src = Get-DownloadSource $File.FullName
 
-    # Inactive copies: Prism/MultiMC/Modrinth rename a switched-off mod to *.jar.disabled, and people keep *.old / *.bak / *.duplicate copies. The game does not load them.
     $inactive = ($File.Extension -in '.disabled', '.old', '.bak', '.duplicate', '.backup', '.off')
     $modrinthTitle = $null; if ($verified) { $modrinthTitle = [string]$Modrinth[$sha1].Project }
     $policy = Get-PolicyMod $meta $File.Name $modrinthTitle
@@ -1559,7 +1560,7 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
     elseif ($med -ge 2 -or ($med -ge 1 -and $strongHacks.Count -ge 1)) { $verdict = 'SUSPICIOUS' }
     elseif ($verified) { $verdict = 'VERIFIED' }
     if ($verified -and $verdict -in 'CHEAT', 'MALWARE', 'SUSPICIOUS' -and -not $policy) { $verdict = "$verdict (verified hash: probable false positive)" }
-    # a switched-off copy is not an active cheat: it is reviewed, not counted as a cheater on its own
+
     if ($inactive -and ($verdict -like 'CHEAT*')) { $verdict = 'SUSPICIOUS (inactive copy)' }
 
     [pscustomobject]@{
@@ -3195,8 +3196,6 @@ function Apply-AiResultsToMods($Mods, $AiResults) {
     }
 }
 
-# System findings that really say "cheating". Everything else (Prefetch / Recycle Bin clean-ups, clock changes, remote tools,
-# PowerShell use, Defender exclusions ...) is context for staff: it stays in the report but never changes the verdict or the score.
 $StrongSystemRx = New-Object Regex('(?i)cheat[ -]?client|cheat mod|cheat-named|cheat/hack|hack[- ]module|hack client|game log mentions|injector|memory editor|auto-?clicker|console cheat adapter|macro / automation|macro scripts|clears event logs|event log was cleared|security log was cleared|history saving is switched off|deletes the usn|deletes prefetch|wipes shell history|edits file timestamps|tampers with windows defender', 'Compiled')
 
 function Get-Summary($Mods, $Jvm, $AiResults = @()) {
@@ -3218,14 +3217,14 @@ function Get-Summary($Mods, $Jvm, $AiResults = @()) {
     }
     $all = New-Object System.Collections.Generic.List[object]
     foreach ($s in $script:Sys) { [void]$all.Add($s) }
-    $nSys = $all.Count                    # the first $nSys items of $all are system-forensics findings (kept out of the terminal output)
+    $nSys = $all.Count
     foreach ($j in $Jvm) { foreach ($f in @($j.Findings)) { [void]$all.Add($f) } }
     $sysTexts = New-Object 'System.Collections.Generic.HashSet[string]'
     $allIdx = 0
     foreach ($f in $all) {
         $isSys = ($allIdx -lt $nSys)
         $allIdx++
-        if ($isSys -and -not $StrongSystemRx.IsMatch([string]$f.Rule)) { $c.notes++; continue }   # context only
+        if ($isSys -and -not $StrongSystemRx.IsMatch([string]$f.Rule)) { $c.notes++; continue }
         $rtext = ('{0}: {1}' -f $f.Rule, (Limit-Text $f.Detail 90))
         switch ($f.Severity) {
             'high'   { $c.high++;   $score += 10; [void]$reasons.Add(@(3, $rtext)); if ($isSys) { [void]$sysTexts.Add($rtext) } }
@@ -3255,12 +3254,12 @@ function Get-Summary($Mods, $Jvm, $AiResults = @()) {
     if ($c.modsMalware -gt 0) { $verdict = 'MALWARE FOUND' }
     $sortedReasons = @($reasons | Sort-Object { -[int]$_[0] } | ForEach-Object { [string]$_[1] } | Select-Object -Unique)
     $top = @($sortedReasons | Select-Object -First 10)
-    # what the terminal shows: mod, AI and running-game reasons only (system forensics stay in the JSON report)
+
     $termTop = @($sortedReasons | Where-Object { -not $sysTexts.Contains([string]$_) } | Select-Object -First 6)
 
     $allHacks = New-Object System.Collections.Generic.List[string]
     foreach ($m in $Mods) {
-        if ([string]$m.File -match '(?i)\.(disabled|old|bak|duplicate|backup|off)$') { continue }   # a switched-off copy is not "using" anything
+        if ([string]$m.File -match '(?i)\.(disabled|old|bak|duplicate|backup|off)$') { continue }
         foreach ($h in @($m.Hacks)) {
             if ($h -and $h.Name -and $h.Kind -ne 'Keybind') { [void]$allHacks.Add($h.Name) }
         }
@@ -3317,7 +3316,6 @@ function Write-FindingLine([string]$Sev, [string]$Rule, [string]$Detail, [string
     if ($Detail) { Write-Host (($Indent + '         ') + $Detail) -ForegroundColor Gray }
 }
 
-# The big CAUGHT / SUSPECT / CHAD banner. It is printed LAST, after the whole report.
 function Show-Verdict($Summary, $Mods, $AiResults = @()) {
     $cat = $Summary.category
     $pName = if ($script:Accounts -and $script:Accounts.currentAccountName) { $script:Accounts.currentAccountName } else { 'Player' }
@@ -3351,7 +3349,7 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
 
     Write-Section ('MODS  ({0} jar/file(s) checked)' -f @($Mods).Count)
     $flagged = @($Mods | Where-Object { (Get-ModClass $_) -in 'MALWARE', 'CHEAT', 'SUSPICIOUS' } | Sort-Object { -[int]$_.Score })
-    $flagged = @($flagged | Group-Object { '{0}|{1}' -f $_.File, $_.Sha1 } | ForEach-Object { $_.Group[0] })   # the same jar in two instance folders is listed once
+    $flagged = @($flagged | Group-Object { '{0}|{1}' -f $_.File, $_.Sha1 } | ForEach-Object { $_.Group[0] })
     $fp = @($Mods | Where-Object { (Get-ModClass $_) -eq 'FP' })
     if ($flagged.Count -eq 0) { Write-Line '  No flagged mods.' Green }
     foreach ($m in $flagged) {
@@ -3551,7 +3549,7 @@ function Send-ModFiles([string]$ScanId, [string]$Token, $Mods) {
         if (-not $sha256) { $sha256 = Get-FileHashSafe $c.Path 'SHA256' }
         $sha1 = [string]$c.Mod.Sha1
         if (-not $sha256) { continue }
-        # one file at a time, and never the same bytes twice (copies like .duplicate / .disabled)
+
         if ($seenSha.ContainsKey($sha256)) { continue }
         $seenSha[$sha256] = $true
         try {
@@ -3776,8 +3774,7 @@ function Invoke-Main {
             Write-Host '  Scan done, waiting for Cactus AI for the result...' -ForegroundColor Yellow
             Write-Host '  ==========================================================================' -ForegroundColor Cyan
             $pollUrl = $ApiBase + '/scan/' + $upload.Id + '/status'
-            # Many players can be scanning at once, so the cloud AI works through a first-in-first-out queue.
-            # Keep polling (every 2s) until our mods are done, and show where we are in the queue.
+
             $pollStart = Get-Date
             $maxWaitSec = 900
             $failStreak = 0
@@ -3827,7 +3824,7 @@ function Invoke-Main {
     Write-Host ''
     Write-Host ('  Done in {0}s.' -f [math]::Round($sw.Elapsed.TotalSeconds)) -ForegroundColor DarkGray
     Write-Host '  This is evidence for a human to review, not proof. Check flagged items before acting on them.' -ForegroundColor DarkGray
-    Show-Verdict $summary $modsArr $aiResults      # the CAUGHT / SUSPECT / CHAD banner goes last
+    Show-Verdict $summary $modsArr $aiResults
 }
 
 $script:ScriptSha = $null

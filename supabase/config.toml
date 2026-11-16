@@ -1,8 +1,2 @@
-# Supabase CLI config (only the part this project needs).
-# The scanner has no Supabase login, so the function must accept requests without a Supabase JWT.
-# It protects itself instead: public /upload with schema validation, explicit consent, duplicate detection,
-# per-IP minute/day limits and a global daily cap; short-lived HMAC tokens for direct-to-Storage mod uploads
-# (/mods/sign, /mods/complete); a secret admin token for /admin/*; and size caps (see
-# functions/mcscan-api/core.ts). Staff codes and /ingest have been removed.
 [functions.mcscan-api]
 verify_jwt = false

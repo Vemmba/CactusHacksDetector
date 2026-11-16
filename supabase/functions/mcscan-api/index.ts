@@ -1,4 +1,3 @@
-
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { createHandler, MOD_BUCKET, processAiQueue } from './core.ts';
 import type { ModFile, ScanModMatch, Store, StorageOps } from './core.ts';
@@ -55,7 +54,7 @@ const store: Store = {
   },
   async createModFile(row) {
     const r = await db.from('mod_files').insert(row).select('*').single();
-    if (r.error) return null;                                 
+    if (r.error) return null;
     return (r.data as ModFile | null) ?? null;
   },
   async completeModFile(id, sizeBytes) {
@@ -109,7 +108,7 @@ const store: Store = {
     };
   },
   async deleteScan(id) {
-    
+
     const files = await db.from('mod_files').select('storage_path').eq('scan_id', id).is('deleted_at', null);
     if (files.error) throw new Error(files.error.message);
     const paths = (files.data ?? []).map((f: any) => f.storage_path).filter(Boolean) as string[];
@@ -131,7 +130,7 @@ const store: Store = {
     const scanId = jobs[0].scan_id;
     let queued = 0;
     for (const j of jobs) {
-      // A mod whose SHA-256 was already judged re-uses that result: no new NVIDIA call.
+
       const cached = await store.getCompletedAiResultByHash(j.mod_sha256);
       const r = await db.from('ai_jobs').upsert({
         scan_id: j.scan_id,
@@ -147,7 +146,7 @@ const store: Store = {
     return queued;
   },
   async getCompletedAiResultByHash(sha256) {
-    if (!/^[0-9a-f]{64}$/i.test(sha256 || '')) return null;          // only real SHA-256 hashes are cache keys
+    if (!/^[0-9a-f]{64}$/i.test(sha256 || '')) return null;
     const r = await db.from('ai_jobs').select('result').eq('mod_sha256', sha256).eq('status', 'done')
       .order('created_at', { ascending: false }).limit(1).maybeSingle();
     return (r.data?.result as Record<string, any> | undefined) ?? null;
@@ -164,7 +163,7 @@ const store: Store = {
     const r = await db.rpc('requeue_stuck_ai_jobs', { p_minutes: minutes, p_max_requeues: maxRequeues });
     if (r.error) throw new Error(r.error.message);
     const rows = (r.data ?? []) as any[];
-    // jobs given up on became 'failed' with a SUSPECT result: let their scans finish
+
     for (const scanId of new Set(rows.filter((j) => j.status === 'failed').map((j) => j.scan_id as string))) await refreshScanAi(scanId);
     return rows.length;
   },
@@ -203,22 +202,20 @@ const store: Store = {
   },
 };
 
-// Recomputes a scan's AI state from its jobs and applies the verdict rules (AI can raise a clean scan to REVIEW,
-// never to HIGH RISK on its own).
 async function refreshScanAi(scanId: string): Promise<void> {
   const nowIso = new Date().toISOString();
   const jobs = ((await db.from('ai_jobs').select('status, result').eq('scan_id', scanId)).data ?? []) as any[];
   if (!jobs.length) return;
   const active = jobs.filter((j) => j.status === 'queued' || j.status === 'processing');
   const allDone = active.length === 0;
-  // 'failed' jobs carry a SUSPECT fallback result, so they count too
+
   const results = jobs.filter((j) => (j.status === 'done' || j.status === 'failed') && j.result).map((j) => j.result);
   const aiStatus = allDone ? 'completed' : jobs.some((j) => j.status === 'processing') ? 'processing' : 'pending';
   await db.from('scans').update({ ai_status: aiStatus, ai_results: results, ai_analyzed_at: nowIso }).eq('id', scanId);
   if (!results.length) return;
 
   const hasAiCheat = results.some((res: any) => res.verdict === 'CHEAT');
-  // a SUSPECT with a low score is the model hedging, not evidence: only 40+ (or a failed inspection, scored 50) counts
+
   const hasAiSuspect = results.some((res: any) => res.verdict === 'SUSPECT' && Number(res.cheating_score ?? res.score ?? 50) >= 40);
   const isMinorIndicator = results.some((res: any) =>
     res.hack_name && /shield.*indicat|reach.*circle|reach.*indicat|fullbright|freecam|cps|hud/i.test(res.hack_name));
@@ -271,7 +268,7 @@ async function refreshScanAi(scanId: string): Promise<void> {
           return { size: Number.isFinite(size) ? size : 0 };
         },
         async createDownloadUrl(path, expiresIn, fileName) {
-          
+
           const r = await db.storage.from(MOD_BUCKET).createSignedUrl(path, expiresIn, fileName ? { download: fileName } : undefined);
           if (r.error || !r.data?.signedUrl) return null;
           return absoluteUrl(r.data.signedUrl);
@@ -306,9 +303,9 @@ async function refreshScanAi(scanId: string): Promise<void> {
         env,
         processAiQueue: async () => {
           const run = () => processAiQueue({ store, env, log: (m) => console.error(m) });
-          
+
           if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime.waitUntil) {
-            
+
             EdgeRuntime.waitUntil(run());
           } else {
             run().catch((e) => console.error('background AI process error:', e));

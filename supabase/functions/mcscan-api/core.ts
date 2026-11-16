@@ -1,17 +1,16 @@
-
-export const MAX_BODY = 1_000_000;          
-export const MAX_SMALL_BODY = 8_192;        
+export const MAX_BODY = 1_000_000;
+export const MAX_SMALL_BODY = 8_192;
 export const MAX_MODS = 2000;
 export const MAX_HACKS_PER_MOD = 100;
 export const MAX_FINDINGS_PER_MOD = 200;
 export const MAX_SYSTEM = 1500;
 export const MAX_JVM_FINDINGS = 300;
 export const MAX_KEYBINDS = 500;
-export const RETENTION_DAYS = 30;           
+export const RETENTION_DAYS = 30;
 export const ADMIN_PER_MIN_PER_IP = 600;
 
 export const MOD_BUCKET = 'scan-mods';
-export const MOD_RETENTION_HOURS = 48;      
+export const MOD_RETENTION_HOURS = 48;
 export const MOD_MAX_FILE_BYTES = 32 * 1024 * 1024;
 export const MOD_MAX_FILES_PER_SCAN = 16;
 export const MOD_MAX_BYTES_PER_SCAN = 100 * 1024 * 1024;
@@ -36,15 +35,15 @@ const TOKEN_RX = /^v1\.(\d{10,16})\.([0-9a-f]{64})$/;
 export interface Env {
   ADMIN_TOKEN?: string;
   IP_SALT?: string;
-  UPLOAD_TOKEN_SECRET?: string;     
-  ALLOWED_SCRIPT_SHA256?: string;   
-  NVIDIA_API_KEY?: string;          
+  UPLOAD_TOKEN_SECRET?: string;
+  ALLOWED_SCRIPT_SHA256?: string;
+  NVIDIA_API_KEY?: string;
   NVIDIA_AI_MODEL?: string;
   NVIDIA_AI_FALLBACK_MODEL?: string;
   NVIDIA_AI_HEDGE_MS?: string;
-  NVIDIA_AI_CONCURRENCY?: string;   // 1 (default) to 3 NVIDIA calls at once
-  NVIDIA_AI_DELAY_MS?: string;      // pause between NVIDIA calls, default 2000
-  
+  NVIDIA_AI_CONCURRENCY?: string;
+  NVIDIA_AI_DELAY_MS?: string;
+
   PUBLIC_PER_MIN_PER_IP?: string;
   PUBLIC_PER_DAY_PER_IP?: string;
   PUBLIC_PER_DAY_GLOBAL?: string;
@@ -134,20 +133,18 @@ export interface Store {
     scan_id: string; mod_sha256: string; mod_file: string; evidence: Record<string, any>;
   }>): Promise<number>;
   getCompletedAiResultByHash(sha256: string): Promise<Record<string, any> | null>;
-  /** Atomically takes up to `limit` queued jobs, oldest first, never more than `concurrency` processing at once
-   *  (counting every worker) and not sooner than `minGapMs` after the previous claim. */
+
   claimAiJobs(limit: number, concurrency: number, minGapMs: number): Promise<AiJob[]>;
-  /** Puts jobs stuck in 'processing' for `minutes`+ back in the queue; jobs that stalled `maxRequeues` times become
-   *  'failed' with a SUSPECT result. Returns how many jobs were touched. */
+
   requeueStuckAiJobs(minutes: number, maxRequeues: number): Promise<number>;
   completeAiJob(jobId: string, scanId: string, result: Record<string, any>): Promise<boolean>;
-  /** A call failed: back to 'queued', not before `nextRunAt`, with the number of calls made so far. */
+
   retryAiJob(jobId: string, error: string, attempts: number, nextRunAt: string): Promise<boolean>;
-  /** Marks the job 'failed' and stores `fallback` (a SUSPECT result) so the scan can still finish. */
+
   failAiJob(jobId: string, scanId: string, error: string, attempts: number, fallback: Record<string, any>): Promise<boolean>;
-  /** Light read for the status poll (no child tables). */
+
   getScanAiState(id: string): Promise<{ id: string; ai_status: string | null; category: string | null; threat_score: number | null; ai_results: any[] | null } | null>;
-  /** Place of this scan's oldest unfinished job in the FIFO queue (1 = next / running), plus how many jobs are active. */
+
   aiQueuePosition(scanId: string): Promise<{ position: number; total: number } | null>;
   listAiJobs(limit?: number): Promise<AiJob[]>;
 }
@@ -156,7 +153,7 @@ export interface Deps {
   store: Store;
   storage?: StorageOps;
   env: Env;
-  now?: () => number;                       
+  now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   randomBytes?: (n: number) => Uint8Array;
   log?: (msg: string) => void;
@@ -219,7 +216,7 @@ function clientIp(req: Request): string {
 function str(v: unknown, max: number): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') return null;
-  
+
   const s = String(v).replace(/[\u0000-\u001F\u007F\u2028\u2029]/g, ' ').trim();
   return s.length > max ? s.slice(0, max) : s;
 }
@@ -320,7 +317,6 @@ export function validateReport(input: unknown, ipHash: string, allowedHashes: st
     initialCategory = 'suspect';
   }
 
-  // The scanner already weighed banned / suspect mods, system noise and verified hashes: its own category wins.
   const scannerCategory = str(sum.category, 10);
   if (scannerCategory === 'cheater' || scannerCategory === 'suspect') initialCategory = scannerCategory;
   else if (scannerCategory === 'chad' || scannerCategory === 'legit') initialCategory = 'legit';
@@ -363,32 +359,19 @@ async function readCapped(req: Request, max: number): Promise<Uint8Array | null>
   return out;
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// AI inspection queue
-//   jobs: queued -> processing -> done | failed      (FIFO by created_at, claimed atomically in the database)
-//   - NVIDIA is called one job at a time (NVIDIA_AI_CONCURRENCY, max 3) with a delay (NVIDIA_AI_DELAY_MS, ~2s) between calls
-//   - 429 / any error: one call per claim; a failed call puts the job back in the queue with a backoff (next_run_at), saved in
-//     the database so it survives a dead worker. After 3 retries the mod is marked SUSPECT (job status 'failed' + fallback result)
-//   - a mod whose SHA-256 was already judged re-uses the cached 'done' result (no API call)
-//   - a job stuck in 'processing' for AI_STUCK_MINUTES goes back to 'queued'
-// ---------------------------------------------------------------------------------------------------------------------
-export const AI_MAX_RETRIES = 3;                      // retries after the first attempt (4 NVIDIA calls max per mod)
-export const AI_BACKOFF_MS = [2000, 5000, 12000];     // wait before retry 1, 2, 3 (a longer Retry-After header wins, max 30s)
-// Benchmarked from the Supabase function on a disguised-cheat sample: both flagged it CHEAT every time (Super VL 8-11s, Ultra 12-13s).
-// Gemma and Step-5 timed out most runs, GLM-5.3-flash never answered from Supabase.
+export const AI_MAX_RETRIES = 3;
+export const AI_BACKOFF_MS = [2000, 5000, 12000];
+
 export const AI_DEFAULT_MODEL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
 export const AI_FALLBACK_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
-export const AI_HEDGE_MS = 12_000;                    // no answer yet after this long -> ask the second model too, first good answer wins
+export const AI_HEDGE_MS = 12_000;
 export const AI_STUCK_MINUTES = 5;
-export const AI_MAX_REQUEUES = 3;                     // a job that stalls this many times is given up (SUSPECT)
+export const AI_MAX_REQUEUES = 3;
 export const AI_DEFAULT_DELAY_MS = 2000;
-const AI_WORKER_BUDGET_MS = 70_000;                   // stop starting new jobs after this; the next kick continues the queue
-const AI_FETCH_TIMEOUT_MS = 45_000;                   // whole judging call (both models); worst case 70s + 45s, inside the 150s function limit
+const AI_WORKER_BUDGET_MS = 70_000;
+const AI_FETCH_TIMEOUT_MS = 45_000;
 const SHA256_RX = /^[0-9a-f]{64}$/i;
 
-// Only UNKNOWN mods go to the AI: not on Modrinth, not a known-good hash, and not already identified by the scanner as
-// a cheat or malware (that verdict is final, so judging it again would only burn queue time and NVIDIA calls).
-// What is left is the scanner's UNKNOWN verdicts (class CLEAN) and its SUSPICIOUS ones.
 export function isUnknownMod(m: { class?: string | null; modrinth?: unknown }): boolean {
   if (m.modrinth) return false;
   const cls = String(m.class || 'CLEAN').toUpperCase();
@@ -434,7 +417,6 @@ Respond STRICTLY as a single JSON object with these exact keys:
 }`;
 }
 
-// Never let the model hand out CHAD when the scanner's own evidence says otherwise.
 function chadIsBacked(evidence: Record<string, any>, score: number): boolean {
   const ev = evidence || {};
   const cls = String(ev.class || '').toUpperCase();
@@ -460,7 +442,7 @@ export function suspectFallback(file: string, reason: string): AiModInspectionRe
 
 function parseAiJson(rawText: string): Record<string, any> {
   const text = String(rawText || '').replace(/```json\s*/gi, '').replace(/```/g, '').trim();
-  try { return JSON.parse(text); } catch { /* fall through */ }
+  try { return JSON.parse(text); } catch {  }
   const a = text.indexOf('{');
   const b = text.lastIndexOf('}');
   if (a >= 0 && b > a) return JSON.parse(text.slice(a, b + 1));
@@ -491,7 +473,7 @@ async function callNvidiaOnce(job: AiJob, apiKey: string, model: string, signal:
           { role: 'user', content: buildAiPrompt(job.mod_file, job.evidence) },
         ],
         temperature: 0.2,
-        max_tokens: 4096,                              // room for the model's reasoning plus the JSON answer
+        max_tokens: 4096,
       }),
     });
   } catch (e) {
@@ -523,9 +505,6 @@ async function callNvidiaOnce(job: AiJob, apiKey: string, model: string, signal:
   };
 }
 
-// One judging call. `models[0]` is asked first; if it has not answered after AI_HEDGE_MS, `models[1]` is asked too and the first
-// valid JSON answer wins (the loser is cancelled). A model that fails fast is NOT hedged: the job goes back to the queue with a
-// backoff, and the next attempt asks the models in the other order.
 async function callNvidia(job: AiJob, apiKey: string, models: string[], hedgeMs: number): Promise<AiModInspectionResult> {
   const ctrl = new AbortController();
   const timers: ReturnType<typeof setTimeout>[] = [];
@@ -558,14 +537,11 @@ async function callNvidia(job: AiJob, apiKey: string, models: string[], hedgeMs:
   }
 }
 
-
-// Diagnostic for staff: one NVIDIA call made FROM the function (same network path, key and model the queue uses), with timing.
-// `full` sends a real-size judging prompt, otherwise a tiny one. Nothing is stored.
 export async function testNvidia(env: Env, opts: { model?: string | null; full?: boolean; sample?: string | null; timeoutMs?: number }): Promise<Record<string, unknown>> {
   const apiKey = env.NVIDIA_API_KEY;
   if (!apiKey || apiKey.length < 10) return { keySet: false, error: 'NVIDIA_API_KEY is not set (or too short)' };
   const model = opts.model || env.NVIDIA_AI_MODEL || AI_DEFAULT_MODEL;
-  // `sample: 'cheat'` is a disguised cheat with only weak, scattered signals: a lazy model answers CHAD, a careful one SUSPECT/CHEAT.
+
   const sample = opts.sample === 'cheat'
     ? {
         file: 'FastPlaceHelper-1.2.jar', modName: 'FastPlace Helper', modId: 'fph', loader: 'fabric', classes: 31, class: 'CLEAN', score: 18,
@@ -591,9 +567,9 @@ export async function testNvidia(env: Env, opts: { model?: string | null; full?:
     const text = await res.text();
     let reply: unknown = null;
     let usage: unknown = null;
-    try { const d = JSON.parse(text); reply = d?.choices?.[0]?.message?.content ?? null; usage = d?.usage ?? null; } catch { /* not JSON */ }
+    try { const d = JSON.parse(text); reply = d?.choices?.[0]?.message?.content ?? null; usage = d?.usage ?? null; } catch {  }
     let verdict: string | null = null;
-    if (typeof reply === 'string') { try { verdict = String(parseAiJson(reply).verdict || '').toUpperCase() || null; } catch { /* reply was not JSON */ } }
+    if (typeof reply === 'string') { try { verdict = String(parseAiJson(reply).verdict || '').toUpperCase() || null; } catch {  } }
     return { keySet: true, model, full: !!opts.full, sample: opts.sample || null, httpStatus: res.status, ms: Date.now() - started, verdict, reply: typeof reply === 'string' ? reply.slice(0, 500) : reply, usage, raw: res.ok ? undefined : text.slice(0, 400) };
   } catch (e) {
     return { keySet: true, model, full: !!opts.full, ms: Date.now() - started, error: (e as Error).message };
@@ -619,7 +595,6 @@ export async function processAiQueue(deps: Deps, limit = 25): Promise<{ processe
   try { await store.requeueStuckAiJobs(AI_STUCK_MINUTES, AI_MAX_REQUEUES); }
   catch (e) { log('requeueStuckAiJobs failed: ' + (e as Error).message); }
 
-  // One job: cache -> one NVIDIA call -> done; on failure back to 'queued' with a backoff, or 'failed' + SUSPECT after the last retry.
   async function runJob(job: AiJob): Promise<boolean> {
     try {
       if (SHA256_RX.test(job.mod_sha256)) {
@@ -629,15 +604,15 @@ export async function processAiQueue(deps: Deps, limit = 25): Promise<{ processe
           return true;
         }
       }
-      const attemptNo = (job.attempts || 0) + 1;       // attempts counts calls already made (saved in the database)
+      const attemptNo = (job.attempts || 0) + 1;
       let result: AiModInspectionResult;
       try {
-        result = await callNvidia(job, apiKey!, attemptNo % 2 === 1 ? [model, fallbackModel] : [fallbackModel, model], hedgeMs);   // alternate who goes first
+        result = await callNvidia(job, apiKey!, attemptNo % 2 === 1 ? [model, fallbackModel] : [fallbackModel, model], hedgeMs);
       } catch (e) {
         const msg = (e as Error).message;
         log(`ai job ${job.id} attempt ${attemptNo} failed: ${msg}`);
         if (attemptNo > AI_MAX_RETRIES) {
-          // 1 try + 3 retries used up: SUSPECT, and the scan can finish
+
           await store.failAiJob(job.id, job.scan_id, msg, attemptNo, suspectFallback(job.mod_file, 'NVIDIA unavailable after ' + attemptNo + ' tries'));
         } else {
           const wait = Math.max(AI_BACKOFF_MS[attemptNo - 1] ?? 12000, (e as AiCallError).waitMs || 0);
@@ -648,7 +623,7 @@ export async function processAiQueue(deps: Deps, limit = 25): Promise<{ processe
       await store.completeAiJob(job.id, job.scan_id, result);
       return true;
     } catch (e) {
-      // database trouble: leave the job 'processing'; the stuck-job check puts it back in the queue.
+
       log('ai job ' + job.id + ' crashed: ' + (e as Error).message);
       return false;
     }
@@ -661,7 +636,7 @@ export async function processAiQueue(deps: Deps, limit = 25): Promise<{ processe
     if (!jobs.length) break;
     const outcomes = await Promise.all(jobs.map(runJob));
     for (const ok of outcomes) { if (ok) processed++; else errors++; }
-    if (delayMs > 0) await sleep(delayMs);          // spacing between NVIDIA calls
+    if (delayMs > 0) await sleep(delayMs);
   }
   return { processed, errors };
 }
@@ -691,7 +666,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
 
   async function isAdmin(req: Request): Promise<boolean> {
     const token = env.ADMIN_TOKEN || '';
-    if (token.length < 24) return false;                         
+    if (token.length < 24) return false;
     const h = req.headers.get('authorization') || '';
     const m = /^Bearer\s+(.+)$/i.exec(h);
     if (!m) return false;
@@ -699,7 +674,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
   }
 
   async function issueUploadToken(scanId: string): Promise<{ token: string; expiresAt: string } | null> {
-    if (uploadSecret.length < 24) return null;                   
+    if (uploadSecret.length < 24) return null;
     const expiresAt = now() + UPLOAD_TOKEN_TTL_MS;
     return { token: await makeUploadToken(scanId, expiresAt, uploadSecret), expiresAt: new Date(expiresAt).toISOString() };
   }
@@ -759,7 +734,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
     let id = await store.ingestPublic(reportHash, rows.scan, rows.mods, rows.hacks, rows.findings, rows.keybinds);
     let duplicate = false;
     if (!id) {
-      
+
       id = await store.findScanByReportHash(reportHash);
       if (!id) return err(409, 'duplicate_report');
       duplicate = true;
@@ -863,7 +838,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
     if (await store.getModFileByHash(scanId, sha256)) return err(409, 'already_uploaded');
 
     const id = crypto.randomUUID();
-    
+
     const extMatch = /\.([A-Za-z0-9]{1,10})$/.exec(fileName);
     const ext = (extMatch ? extMatch[1] : 'bin').toLowerCase();
     const objectName = toHex(randomBytes(16)) + '.' + ext;
@@ -1018,11 +993,10 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
             const q = await store.aiQueuePosition(scanId);
             if (q) { queuePosition = q.position; queueTotal = q.total; }
           } catch (e) { log('aiQueuePosition failed: ' + (e as Error).message); }
-          // The polling scanner doubles as the worker's heartbeat: it restarts a queue nobody is working on,
-          // and requeues stuck jobs. Claims are atomic, so extra kicks are harmless (throttled per instance).
+
           if (deps.processAiQueue && now() - lastKickAt >= AI_KICK_EVERY_MS) {
             lastKickAt = now();
-            try { deps.processAiQueue().catch((e) => log('processAiQueue error: ' + (e as Error).message)); } catch { /* ignore */ }
+            try { deps.processAiQueue().catch((e) => log('processAiQueue error: ' + (e as Error).message)); } catch {  }
           }
         }
         return json(200, {
