@@ -16,7 +16,7 @@ param(
     [switch]$IncludeAccountProfiles,
     [switch]$Yes,
     [string]$AiApiKey = $null,
-    [string]$AiModel = 'z-ai/glm-4-9b-chat',
+    [string]$AiModel = 'nvidia/nemotron-3-ultra-550b-a55b',
     [switch]$NoAi
 )
 
@@ -433,6 +433,776 @@ try {
     $script:Native = $true
 } catch { $script:NativeError = $_.Exception.Message }
 
+$script:ProfilerSource = @'
+using System;
+using System.Collections.Generic;
+using System.Text;
+using System.Text.RegularExpressions;
+namespace CactusHacksDetector
+{
+    public class ProfileBuilder
+    {
+        private class Rec { public string Name; public string Super; public bool Mixin; public int Score; }
+        private class Parsed
+        {
+            public string This; public string Super; public bool IsMixin;
+            public List<string> Fields = new List<string>();
+            public List<string> Methods = new List<string>();
+            public List<string> Strings = new List<string>();
+            public List<string> MixinTargets = new List<string>();
+            public List<string> Injects = new List<string>();
+            public HashSet<string> Flags = new HashSet<string>();
+        }
+        private class Pool
+        {
+            public int[] Tag; public int[] A; public int[] C; public string[] Utf;
+            public string ClassName(int i) { if (i <= 0 || i >= Utf.Length) return ""; int u = A[i]; return (u > 0 && u < Utf.Length && Utf[u] != null) ? Utf[u] : ""; }
+            public string Str(int i) { return (i > 0 && i < Utf.Length && Utf[i] != null) ? Utf[i] : ""; }
+        }
+        private readonly List<Rec> recs = new List<Rec>();
+        private readonly Dictionary<string, int> pkgs = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> methods = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> fields = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> strs = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> mixins = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> targets = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> api = new Dictionary<string, int>();
+        private readonly HashSet<string> vocab = new HashSet<string>();
+        private readonly HashSet<string> mixinMethods = new HashSet<string>();
+        private readonly List<string> mapped = new List<string>();
+        private readonly Dictionary<string, string[]> behaviors = new Dictionary<string, string[]>();
+        private int total; private int shortNames; private int junkNames; private int enc; private int mappedCount; private int failed;
+
+        private static readonly string[] VocabSub = new string[] {
+            "killaura", "crystalaura", "autocrystal", "triggerbot", "aimassist", "aimbot", "silentaim", "autoclicker", "jitterclick",
+            "autototem", "autopearl", "autoanchor", "anchoraura", "anchormacro", "bedaura", "autodtap", "doubleanchor", "hitboxexpand",
+            "reachhack", "velocityhack", "noknockback", "antiknockback", "antikb", "nofall", "speedhack", "flyhack", "bunnyhop", "bhop",
+            "scaffold", "fastplace", "fastbreak", "autosprint", "sprintreset", "autoblock", "clickaura", "multiaura", "attackaura",
+            "playeresp", "chestesp", "storageesp", "blockesp", "xrayhack", "autominer", "airjump", "longjump", "waterwalk", "noslow",
+            "antiweb", "timerhack", "pingspoof", "packetspoof", "fakelag", "lagswitch", "hitselect", "stunslam", "maceswap", "breachswap",
+            "autobreach", "autohitcrystal", "inventorytotem", "hovertotem", "autodoublehand", "keypearl", "autotpa", "webmacro",
+            "autofirework", "elytraswap", "shielddisabler", "shieldbreaker", "axespam", "antibot", "rotationspoof",
+            "silentrotation", "cpsbypass", "antimissclick", "tpaura", "nojumpdelay", "inventorystealer", "invcleaner", "maceaura",
+            "autoarmor", "autopot", "lagreach", "popswitch", "legitcrystal", "legitanchor", "legittotem"
+        };
+        private static readonly string[] VocabTok = new string[] { "esp", "aura", "xray", "bhop", "tracers", "nuker", "jesus" };
+        private static readonly string[] PvpHints = new string[] { "totem", "pearl", "anchor", "crystal", "glowstone", "mace" };
+
+        private static string Squash(string s)
+        {
+            StringBuilder sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c >= 'A' && c <= 'Z') sb.Append((char)(c + 32));
+                else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) sb.Append(c);
+            }
+            return sb.ToString();
+        }
+        private static List<string> Tokens(string s)
+        {
+            List<string> r = new List<string>();
+            StringBuilder cur = new StringBuilder();
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                bool up = c >= 'A' && c <= 'Z'; bool lo = c >= 'a' && c <= 'z'; bool dg = c >= '0' && c <= '9';
+                if (!up && !lo && !dg)
+                {
+                    if (cur.Length > 0) { r.Add(cur.ToString().ToLowerInvariant()); cur.Length = 0; }
+                    continue;
+                }
+                if (cur.Length > 0)
+                {
+                    char last = cur[cur.Length - 1];
+                    if (up && last >= 'a' && last <= 'z') { r.Add(cur.ToString().ToLowerInvariant()); cur.Length = 0; }
+                    else if (lo && cur.Length >= 2 && last >= 'A' && last <= 'Z' && cur[cur.Length - 2] >= 'A' && cur[cur.Length - 2] <= 'Z')
+                    {
+                        r.Add(cur.ToString(0, cur.Length - 1).ToLowerInvariant());
+                        cur.Remove(0, cur.Length - 1);
+                    }
+                }
+                cur.Append(c);
+            }
+            if (cur.Length > 0) r.Add(cur.ToString().ToLowerInvariant());
+            return r;
+        }
+        private int Vocab(string text, HashSet<string> found)
+        {
+            if (text == null || text.Length < 3) return 0;
+            if (text.Length > 120) text = text.Substring(text.Length - 120);
+            int before = found.Count;
+            string sq = Squash(text);
+            int cut = Math.Max(text.LastIndexOf('/'), text.LastIndexOf('.'));
+            string lastSeg = Squash(cut >= 0 ? text.Substring(cut + 1) : text);
+            if (lastSeg == "wtap" || lastSeg == "wtapmodule") found.Add("wtap");
+            if (sq.Length >= 4)
+            {
+                for (int i = 0; i < VocabSub.Length; i++)
+                {
+                    string t = VocabSub[i];
+                    int ix = sq.IndexOf(t, StringComparison.Ordinal);
+                    if (ix < 0) continue;
+                    string rest = sq.Substring(ix + t.Length);
+                    if (t == "scaffold" && rest.StartsWith("ing", StringComparison.Ordinal)) continue;
+                    if (t == "nofall" && rest.StartsWith("back", StringComparison.Ordinal)) continue;
+                    if (t == "noslow" && rest.StartsWith("er", StringComparison.Ordinal)) continue;
+                    found.Add(t);
+                }
+            }
+            List<string> tk = Tokens(text);
+            for (int a = 0; a < tk.Count; a++)
+            {
+                for (int b = 0; b < VocabTok.Length; b++) { if (tk[a] == VocabTok[b]) found.Add(VocabTok[b]); }
+            }
+            return found.Count - before;
+        }
+        private static bool IsMapped(string s)
+        {
+            int n = s.Length;
+            if (n < 7 || n > 60) return false;
+            if (s.IndexOf("net/minecraft/class_", StringComparison.Ordinal) >= 0 || s.IndexOf("net.minecraft.class_", StringComparison.Ordinal) >= 0) return true;
+            int us = s.IndexOf('_');
+            if (us < 0) return false;
+            string head = s.Substring(0, us);
+            if (head == "field" || head == "method" || head == "class")
+            {
+                int i = us + 1;
+                int d = 0;
+                while (i < n && s[i] >= '0' && s[i] <= '9') { i++; d++; }
+                return d >= 3 && (i == n || s[i] == '_');
+            }
+            if ((head == "f" || head == "m") && s[n - 1] == '_')
+            {
+                int d2 = 0;
+                for (int i2 = us + 1; i2 < n - 1; i2++) { if (s[i2] >= '0' && s[i2] <= '9') d2++; else return false; }
+                return d2 >= 3;
+            }
+            return false;
+        }
+        private static bool Junk(string leaf)
+        {
+            if (leaf.Length < 3) return false;
+            for (int i = 0; i < leaf.Length; i++) { char c = leaf[i]; if (c != 'I' && c != 'l' && c != '1' && c != 'O' && c != '0' && c != '_') return false; }
+            return true;
+        }
+        private static int U2(byte[] b, int p) { return (b[p] << 8) | b[p + 1]; }
+        private static int S4(byte[] b, int p) { return (b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]; }
+
+        private static string Simple(string path)
+        {
+            if (path == null) return "";
+            int i = path.LastIndexOf('/');
+            string s = i >= 0 ? path.Substring(i + 1) : path;
+            int d = s.LastIndexOf('.');
+            return d > 0 && d < s.Length - 1 && path.IndexOf('/') < 0 ? s.Substring(d + 1) : s;
+        }
+        private static string DescToClass(string d)
+        {
+            if (d == null) return "";
+            if (d.Length > 2 && d[0] == 'L' && d[d.Length - 1] == ';') return d.Substring(1, d.Length - 2);
+            return d;
+        }
+
+        private static void Note(string o, string n, HashSet<string> fl)
+        {
+            bool mc = o.StartsWith("net/minecraft", StringComparison.Ordinal) || o.StartsWith("com/mojang", StringComparison.Ordinal);
+            if (o == "java/lang/Math" || o == "java/lang/StrictMath")
+            {
+                if (n == "atan2") fl.Add("atan2");
+                else if (n == "toDegrees" || n == "toRadians") fl.Add("angleMath");
+                else if (n == "random") fl.Add("random");
+                return;
+            }
+            if (o == "java/util/Random" || o == "java/util/concurrent/ThreadLocalRandom" || o == "java/security/SecureRandom")
+            {
+                if (n == "nextGaussian") fl.Add("gaussian");
+                else if (n.StartsWith("next", StringComparison.Ordinal)) fl.Add("random");
+                return;
+            }
+            if (n == "sleep" && (o == "java/lang/Thread" || o == "java/util/concurrent/TimeUnit")) { fl.Add("sleep"); return; }
+            if (o == "java/lang/System" && (n == "nanoTime" || n == "currentTimeMillis")) { fl.Add("clock"); return; }
+            if (o == "java/lang/reflect/Method" && n == "invoke") { fl.Add("reflectInvoke"); return; }
+            if (n == "setAccessible" && o.StartsWith("java/lang/reflect/", StringComparison.Ordinal)) { fl.Add("setAccessible"); return; }
+            if (o == "java/lang/Class" && (n == "forName" || n.StartsWith("getDeclared", StringComparison.Ordinal))) { fl.Add("reflectLookup"); return; }
+            if (o.StartsWith("java/lang/invoke/MethodHandles", StringComparison.Ordinal)) { fl.Add("methodHandle"); return; }
+            if (o == "java/awt/Robot") { fl.Add("robot"); return; }
+            if (o.StartsWith("org/lwjgl/glfw/GLFW", StringComparison.Ordinal))
+            {
+                if (n.StartsWith("glfwSet", StringComparison.Ordinal) && n.EndsWith("Callback", StringComparison.Ordinal)) fl.Add("glfwCallback");
+                else if (n == "glfwSetCursorPos" || n == "glfwGetMouseButton" || n == "glfwGetKey" || n == "glfwSetInputMode") fl.Add("glfwInput");
+                return;
+            }
+            if (o.StartsWith("org/lwjgl/input/", StringComparison.Ordinal)) { fl.Add("lwjgl2Input"); return; }
+            if (o.StartsWith("com/github/kwhat/jnativehook", StringComparison.Ordinal) || o.StartsWith("org/jnativehook", StringComparison.Ordinal)) { fl.Add("nativeHook"); return; }
+            if (o.StartsWith("java/net/", StringComparison.Ordinal) || o.StartsWith("javax/net/", StringComparison.Ordinal)) { fl.Add("net"); return; }
+            if (n.IndexOf("isableDepthTest", StringComparison.Ordinal) >= 0 && (o.EndsWith("RenderSystem", StringComparison.Ordinal) || o.EndsWith("GlStateManager", StringComparison.Ordinal))) { fl.Add("depthOff"); return; }
+            if (o.IndexOf("ClientTickEvent", StringComparison.Ordinal) >= 0) fl.Add("tickEvent");
+            if (o.IndexOf("HudRenderCallback", StringComparison.Ordinal) >= 0 || o.IndexOf("WorldRenderEvents", StringComparison.Ordinal) >= 0 || o.IndexOf("LevelRenderEvents", StringComparison.Ordinal) >= 0
+                || o.IndexOf("RenderLevelStageEvent", StringComparison.Ordinal) >= 0 || o.IndexOf("RenderGuiEvent", StringComparison.Ordinal) >= 0 || o.IndexOf("HudLayerRegistration", StringComparison.Ordinal) >= 0) fl.Add("renderEvent");
+            if (o.IndexOf("KeyBindingHelper", StringComparison.Ordinal) >= 0 || (o.EndsWith("KeyMapping", StringComparison.Ordinal) && n == "<init>") || (o.EndsWith("KeyBinding", StringComparison.Ordinal) && n == "<init>")) fl.Add("keyBinding");
+            if (n == "send" && (o.EndsWith("/ClientConnection", StringComparison.Ordinal) || o.EndsWith("/Connection", StringComparison.Ordinal))) { fl.Add("sendPacket"); return; }
+            if (!mc) return;
+            if (n.StartsWith("method_", StringComparison.Ordinal) || (n.StartsWith("m_", StringComparison.Ordinal) && n.Length > 5)) { fl.Add("mcMethodRef"); return; }
+            switch (n)
+            {
+                case "attackEntity": fl.Add("attackEntity"); break;
+                case "attack": if (o.EndsWith("MultiPlayerGameMode", StringComparison.Ordinal) || o.EndsWith("InteractionManager", StringComparison.Ordinal)) fl.Add("attackEntity"); break;
+                case "swingHand": case "swing": fl.Add("swing"); break;
+                case "interactEntity": case "interactEntityAtLocation": case "interactAt": fl.Add("interactEntity"); break;
+                case "setSprinting": fl.Add("setSprinting"); break;
+                case "setVelocity": case "setDeltaMovement": case "setMotion": case "addVelocity": case "addDeltaMovement": fl.Add("setVelocity"); break;
+                case "setYaw": case "setPitch": case "setYRot": case "setXRot": case "setHeadYaw": case "setYHeadRot": case "setRot": case "setRotation": case "setAngles": fl.Add("setRotation"); break;
+                case "getAttackCooldownProgress": case "getAttackStrengthScale": case "getAttackCooldownProgressPerTick": fl.Add("attackCooldown"); break;
+                case "clickSlot": case "handleInventoryMouseClick": case "slotClick": case "handleContainerClick": fl.Add("clickSlot"); break;
+                case "sendPacket": case "sendNoEvent": case "sendUnsafe": fl.Add("sendPacket"); break;
+                case "getBoundingBox": case "getBox": case "getBoundingBoxForCulling": case "getHitbox": fl.Add("boundingBox"); break;
+                case "raycast": case "rayTrace": case "clip": case "getEntityHitResult": case "raycastEntity": fl.Add("raycast"); break;
+                case "getEntitiesByClass": case "getEntitiesOfClass": case "getEntities": case "getOtherEntities": case "getEntitiesByType": case "getEntitiesInAABBexcluding": fl.Add("entityQuery"); break;
+                case "getEyePos": case "getEyePosition": case "getCameraPosVec": fl.Add("eyePos"); break;
+                case "getRotationVec": case "getRotationVector": case "getLookAngle": case "getViewVector": fl.Add("lookVec"); break;
+                case "getReachDistance": case "getEntityInteractionRange": case "getBlockInteractionRange": case "getAttackRange": case "getInteractionRange": fl.Add("reachDistance"); break;
+                case "setPosition": case "setPos": case "setPosRaw": case "updatePosition": case "refreshPositionAndAngles": case "moveTo": case "teleport": fl.Add("setPos"); break;
+                case "setOnGround": case "setOnGroundWithKnownMovement": fl.Add("setOnGround"); break;
+                case "useItem": case "interactItem": case "startUsingItem": case "useItemOn": case "interactBlock": case "useOn": fl.Add("useItem"); break;
+                case "setSelectedSlot": case "changeSelectedSlot": fl.Add("swapSlot"); break;
+                case "setPressed": case "setDown": fl.Add("setKeyPressed"); break;
+            }
+        }
+        private static void NoteClass(string c, HashSet<string> fl)
+        {
+            if (c.IndexOf("PlayerMoveC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundMovePlayerPacket", StringComparison.Ordinal) >= 0) fl.Add("movePacket");
+            else if (c.IndexOf("PlayerInteractEntityC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundInteractPacket", StringComparison.Ordinal) >= 0) fl.Add("interactPacket");
+            else if (c.IndexOf("HandSwingC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundSwingPacket", StringComparison.Ordinal) >= 0) fl.Add("swingPacket");
+            else if (c.IndexOf("ClickSlotC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundContainerClickPacket", StringComparison.Ordinal) >= 0) fl.Add("clickPacket");
+            else if (c.IndexOf("PlayerActionC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundPlayerActionPacket", StringComparison.Ordinal) >= 0) fl.Add("actionPacket");
+            else if (c.IndexOf("KeepAliveC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundKeepAlivePacket", StringComparison.Ordinal) >= 0) fl.Add("keepAlivePacket");
+            else if (c.IndexOf("ClientCommandC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundPlayerCommandPacket", StringComparison.Ordinal) >= 0) fl.Add("commandPacket");
+        }
+
+        private static void ReadElem(byte[] b, ref int p, Pool pool, string annType, string elemName, Parsed ps, int depth)
+        {
+            int tag = b[p]; p++;
+            char t = (char)tag;
+            if (t == 's')
+            {
+                string v = pool.Str(U2(b, p)); p += 2;
+                if (annType == "Lorg/spongepowered/asm/mixin/Mixin;" && (elemName == "targets" || elemName == "value") && v.Length > 0) ps.MixinTargets.Add(Simple(v.Replace('.', '/')));
+                else if ((annType.StartsWith("Lorg/spongepowered/asm/mixin/injection/", StringComparison.Ordinal) || annType.StartsWith("Lcom/llamalad7/mixinextras/", StringComparison.Ordinal)) && v.Length > 0)
+                {
+                    if (annType.EndsWith("/At;", StringComparison.Ordinal)) { if (elemName == "target") ps.Injects.Add("at:" + AtTarget(v)); }
+                    else if (elemName == "method") { int pi = v.IndexOf('('); ps.Injects.Add(pi > 0 ? v.Substring(0, pi) : v); }
+                }
+            }
+            else if (t == 'c')
+            {
+                string d = pool.Str(U2(b, p)); p += 2;
+                if (annType == "Lorg/spongepowered/asm/mixin/Mixin;" && d.Length > 0) ps.MixinTargets.Add(Simple(DescToClass(d)));
+            }
+            else if (t == 'e') { p += 4; }
+            else if (t == '@') { ReadAnnotation(b, ref p, pool, ps, depth + 1); }
+            else if (t == '[')
+            {
+                int n = U2(b, p); p += 2;
+                for (int i = 0; i < n; i++) ReadElem(b, ref p, pool, annType, elemName, ps, depth + 1);
+            }
+            else { p += 2; }
+        }
+        private static string AtTarget(string v)
+        {
+            int semi = v.IndexOf(';');
+            string tail = semi >= 0 ? v.Substring(semi + 1) : v;
+            int par = tail.IndexOf('(');
+            if (par > 0) tail = tail.Substring(0, par);
+            tail = tail.Trim();
+            if (tail.Length == 0)
+            {
+                string cls = semi > 0 ? DescToClass(v.Substring(0, semi + 1)) : v;
+                return Simple(cls);
+            }
+            return tail;
+        }
+        private static void ReadAnnotation(byte[] b, ref int p, Pool pool, Parsed ps, int depth)
+        {
+            if (depth > 6) throw new Exception("annotation depth");
+            string type = pool.Str(U2(b, p)); p += 2;
+            int pairs = U2(b, p); p += 2;
+            if (type == "Lorg/spongepowered/asm/mixin/Mixin;" && depth == 0) ps.IsMixin = true;
+            for (int i = 0; i < pairs; i++)
+            {
+                string en = pool.Str(U2(b, p)); p += 2;
+                ReadElem(b, ref p, pool, type, en, ps, depth);
+            }
+        }
+        private static void ReadAnnotations(byte[] b, int p, Pool pool, Parsed ps)
+        {
+            int n = U2(b, p); p += 2;
+            for (int i = 0; i < n && i < 64; i++) ReadAnnotation(b, ref p, pool, ps, 0);
+        }
+
+        private static Parsed Parse(byte[] b)
+        {
+            Parsed ps = new Parsed();
+            if (b == null || b.Length < 10 || S4(b, 0) != unchecked((int)0xCAFEBABE)) return null;
+            int n = U2(b, 8);
+            Pool pool = new Pool();
+            pool.Tag = new int[n]; pool.A = new int[n]; pool.C = new int[n]; pool.Utf = new string[n];
+            int p = 10;
+            for (int i = 1; i < n; i++)
+            {
+                int t = b[p]; pool.Tag[i] = t; p++;
+                if (t == 1) { int ul = U2(b, p); p += 2; pool.Utf[i] = Encoding.UTF8.GetString(b, p, ul); p += ul; }
+                else if (t == 3 || t == 4) { p += 4; }
+                else if (t == 5 || t == 6) { p += 8; i++; }
+                else if (t == 7 || t == 8 || t == 16 || t == 19 || t == 20) { pool.A[i] = U2(b, p); p += 2; }
+                else if (t == 9 || t == 10 || t == 11 || t == 12 || t == 17 || t == 18) { pool.A[i] = U2(b, p); pool.C[i] = U2(b, p + 2); p += 4; }
+                else if (t == 15) { p += 3; }
+                else return null;
+            }
+            p += 2;
+            ps.This = pool.ClassName(U2(b, p)); p += 2;
+            ps.Super = pool.ClassName(U2(b, p)); p += 2;
+            int ic = U2(b, p); p += 2 + 2 * ic;
+            for (int i = 1; i < n; i++)
+            {
+                int tg = pool.Tag[i];
+                if (tg == 8) { string s = pool.Str(pool.A[i]); if (s.Length > 0 && ps.Strings.Count < 3000) ps.Strings.Add(s); }
+                else if (tg == 7) { string c = pool.ClassName(i); if (c.Length > 0) NoteClass(c, ps.Flags); }
+            }
+            try
+            {
+                int fc = U2(b, p); p += 2;
+                for (int f = 0; f < fc; f++)
+                {
+                    string fn = pool.Str(U2(b, p + 2));
+                    if (fn.Length > 0) ps.Fields.Add(fn);
+                    p += 6;
+                    int fac = U2(b, p); p += 2;
+                    for (int k = 0; k < fac; k++) { int fl2 = S4(b, p + 2); p += 6 + fl2; }
+                }
+                int mc = U2(b, p); p += 2;
+                for (int m = 0; m < mc; m++)
+                {
+                    string mn = pool.Str(U2(b, p + 2));
+                    if (mn.Length > 0) ps.Methods.Add(mn);
+                    p += 6;
+                    int mac = U2(b, p); p += 2;
+                    for (int k = 0; k < mac; k++)
+                    {
+                        string an = pool.Str(U2(b, p));
+                        int al = S4(b, p + 2);
+                        int body = p + 6;
+                        if (an == "RuntimeInvisibleAnnotations" || an == "RuntimeVisibleAnnotations")
+                        {
+                            try { ReadAnnotations(b, body, pool, ps); } catch (Exception) { }
+                        }
+                        p = body + al;
+                    }
+                }
+                int ca = U2(b, p); p += 2;
+                for (int k = 0; k < ca; k++)
+                {
+                    string an2 = pool.Str(U2(b, p));
+                    int al2 = S4(b, p + 2);
+                    int body2 = p + 6;
+                    if (an2 == "RuntimeInvisibleAnnotations" || an2 == "RuntimeVisibleAnnotations")
+                    {
+                        try { ReadAnnotations(b, body2, pool, ps); } catch (Exception) { }
+                    }
+                    p = body2 + al2;
+                }
+            }
+            catch (Exception) { }
+            for (int i = 1; i < n; i++)
+            {
+                int tg = pool.Tag[i];
+                if (tg == 9 || tg == 10 || tg == 11)
+                {
+                    int cls = pool.A[i]; int nt = pool.C[i];
+                    if (cls <= 0 || cls >= n || nt <= 0 || nt >= n) continue;
+                    string o = pool.ClassName(cls);
+                    string nm = pool.Str(pool.A[nt]);
+                    if (o.Length > 0 && nm.Length > 0) Note(o, nm, ps.Flags);
+                }
+            }
+            return ps;
+        }
+
+        private static int Bump(Dictionary<string, int> d, string k, int by)
+        {
+            int c; d.TryGetValue(k, out c); c += by; d[k] = c; return c;
+        }
+        private static void Top(Dictionary<string, int> d, int max, int minScore, List<string> into)
+        {
+            List<KeyValuePair<string, int>> l = new List<KeyValuePair<string, int>>();
+            foreach (KeyValuePair<string, int> kv in d) { if (kv.Value >= minScore) l.Add(kv); }
+            l.Sort(delegate(KeyValuePair<string, int> x, KeyValuePair<string, int> y)
+            {
+                int c = y.Value.CompareTo(x.Value);
+                return c != 0 ? c : string.CompareOrdinal(x.Key, y.Key);
+            });
+            for (int i = 0; i < l.Count && i < max; i++) into.Add(l[i].Key);
+        }
+        private bool LooksNoise(string s)
+        {
+            if (s.Length < 3 || s.Length > 80) return true;
+            if (s.Length >= 8 && s[4] == '-' && s[0] >= '0' && s[0] <= '9') return true;
+            if (s[0] == '(' || (s[0] == 'L' && s[s.Length - 1] == ';' && s.IndexOf(' ') < 0)) return true;
+            int letters = 0;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c < 32) return true;
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) letters++;
+            }
+            return letters < 2;
+        }
+        private bool LooksEncrypted(string s)
+        {
+            if (s.Length < 6 || s.IndexOf(' ') >= 0) return false;
+            int letters = 0; int high = 0;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) letters++;
+                else if (c > 126 || c < 32) high++;
+            }
+            return high * 3 >= s.Length || letters * 100 < s.Length * 35;
+        }
+        private void AddString(string s, int bonus)
+        {
+            if (LooksNoise(s)) return;
+            if (IsMapped(s)) { mappedCount++; if (mapped.Count < 8 && !mapped.Contains(s)) mapped.Add(s); return; }
+            int existing;
+            if (strs.TryGetValue(s, out existing)) { if (bonus > existing) strs[s] = bonus; return; }
+            if (strs.Count >= 30000) return;
+            int score = 1 + bonus;
+            HashSet<string> f = new HashSet<string>();
+            if (Vocab(s, f) > 0) { score += 20 * f.Count; foreach (string v in f) vocab.Add(v); }
+            if (s.IndexOf(' ') > 0 && s.Length <= 40 && s[0] >= 'A' && s[0] <= 'Z') score += 6;
+            if (LooksEncrypted(s)) { enc++; if (score < 2) return; }
+            strs[s] = score;
+        }
+        private int ScoreName(string name, string sup, bool mixin)
+        {
+            int score = 0;
+            HashSet<string> f = new HashSet<string>();
+            if (Vocab(name, f) > 0) { score += 50; foreach (string v in f) vocab.Add(v); }
+            string ls = sup == null ? "" : sup.ToLowerInvariant();
+            if (ls.Length > 0 && ls != "java/lang/object")
+            {
+                if (ls.IndexOf("module", StringComparison.Ordinal) >= 0 || ls.IndexOf("hack", StringComparison.Ordinal) >= 0 || ls.IndexOf("cheat", StringComparison.Ordinal) >= 0
+                    || ls.IndexOf("feature", StringComparison.Ordinal) >= 0 || ls.IndexOf("function", StringComparison.Ordinal) >= 0) score += 25;
+                else score += 2;
+            }
+            string ln = name.ToLowerInvariant();
+            if (ln.IndexOf("/module", StringComparison.Ordinal) >= 0 || ln.IndexOf("/hack", StringComparison.Ordinal) >= 0 || ln.IndexOf("/cheat", StringComparison.Ordinal) >= 0
+                || ln.IndexOf("/combat", StringComparison.Ordinal) >= 0 || ln.IndexOf("/movement", StringComparison.Ordinal) >= 0 || ln.IndexOf("/exploit", StringComparison.Ordinal) >= 0
+                || ln.IndexOf("/client/", StringComparison.Ordinal) >= 0) score += 10;
+            if (mixin) score += 5;
+            return score;
+        }
+        private static void AddBehavior(Dictionary<string, string[]> d, string rule, string cls)
+        {
+            string[] cur;
+            if (d.TryGetValue(rule, out cur)) { cur[1] = (int.Parse(cur[1]) + 1).ToString(); return; }
+            d[rule] = new string[] { cls, "1" };
+        }
+
+        public bool AddClass(byte[] b, string entryName)
+        {
+            Parsed ps = null;
+            try { ps = Parse(b); } catch (Exception) { ps = null; }
+            string name = entryName;
+            if (name != null && name.EndsWith(".class", StringComparison.Ordinal)) name = name.Substring(0, name.Length - 6);
+            total++;
+            if (ps == null) { failed++; if (name != null) AddNameOnly(name); return false; }
+            if (ps.This != null && ps.This.Length > 0) name = ps.This;
+            if (name == null) name = "";
+            AddNameOnly(name);
+            string leaf = Simple(name);
+            if (leaf.Length <= 2) shortNames++;
+            if (Junk(leaf)) junkNames++;
+            int score = ScoreName(name, ps.Super, ps.IsMixin);
+            if (recs.Count < 6000 || score > 0)
+            {
+                Rec r = new Rec(); r.Name = name; r.Super = ps.Super; r.Mixin = ps.IsMixin; r.Score = score;
+                if (recs.Count < 12000) recs.Add(r);
+            }
+            for (int i = 0; i < ps.Methods.Count; i++)
+            {
+                string m = ps.Methods[i];
+                if (m.Length < 4 || m[0] == '<' || m.StartsWith("lambda$", StringComparison.Ordinal) || m.StartsWith("access$", StringComparison.Ordinal) || Junk(m)) continue;
+                if (ps.IsMixin && mixinMethods.Count < 4000) mixinMethods.Add(m);
+                if (methods.ContainsKey(m)) continue;
+                if (methods.Count >= 20000) continue;
+                int sc = 1;
+                HashSet<string> f = new HashSet<string>();
+                if (Vocab(m, f) > 0) { sc += 20 * f.Count; foreach (string v in f) vocab.Add(v); }
+                if (m.Length >= 7 && m[0] >= 'a' && m[0] <= 'z') sc += 1;
+                methods[m] = sc;
+            }
+            for (int i = 0; i < ps.Fields.Count; i++)
+            {
+                string fl = ps.Fields[i];
+                if (fl.Length < 3 || Junk(fl) || fields.ContainsKey(fl) || fields.Count >= 10000) continue;
+                int sc = 1;
+                HashSet<string> f = new HashSet<string>();
+                if (Vocab(fl, f) > 0) { sc += 20 * f.Count; foreach (string v in f) vocab.Add(v); }
+                fields[fl] = sc;
+            }
+            bool hintPvp = false; bool hintClick = false;
+            for (int i = 0; i < ps.Strings.Count; i++)
+            {
+                string s = ps.Strings[i];
+                AddString(s, 0);
+                if (!hintPvp || !hintClick)
+                {
+                    string ls = s.ToLowerInvariant();
+                    if (!hintPvp) { for (int h = 0; h < PvpHints.Length; h++) { if (ls.IndexOf(PvpHints[h], StringComparison.Ordinal) >= 0) { hintPvp = true; break; } } }
+                    if (!hintClick && (ls.IndexOf("click", StringComparison.Ordinal) >= 0 || ls.IndexOf("cps", StringComparison.Ordinal) >= 0 || ls.IndexOf("macro", StringComparison.Ordinal) >= 0)) hintClick = true;
+                }
+            }
+            string lname = name.ToLowerInvariant();
+            for (int h = 0; h < PvpHints.Length && !hintPvp; h++) { if (lname.IndexOf(PvpHints[h], StringComparison.Ordinal) >= 0) hintPvp = true; }
+            if (!hintClick && (lname.IndexOf("click", StringComparison.Ordinal) >= 0 || lname.IndexOf("macro", StringComparison.Ordinal) >= 0)) hintClick = true;
+            if (ps.IsMixin)
+            {
+                Bump(mixins, Simple(name), 1);
+                for (int i = 0; i < ps.MixinTargets.Count; i++) Bump(targets, ps.MixinTargets[i], 2);
+            }
+            for (int i = 0; i < ps.Injects.Count; i++) Bump(targets, ps.Injects[i], 1);
+            for (int i = 0; i < ps.Injects.Count && i < 200; i++) { string im = ps.Injects[i]; if (!im.StartsWith("at:", StringComparison.Ordinal) && mixinMethods.Count < 4000) mixinMethods.Add(im); }
+            HashSet<string> fl2 = ps.Flags;
+            foreach (string k in fl2) Bump(api, k, 1);
+            Evaluate(fl2, name, hintPvp, hintClick, ps.IsMixin);
+            return true;
+        }
+        private void AddNameOnly(string name)
+        {
+            if (name == null) return;
+            int i = name.LastIndexOf('/');
+            string pk = i > 0 ? name.Substring(0, i) : "(root)";
+            string[] seg = pk.Split('/');
+            string key = seg.Length > 4 ? string.Join("/", seg, 0, 4) : pk;
+            Bump(pkgs, key, 1);
+        }
+        private void Evaluate(HashSet<string> f, string cls, bool hintPvp, bool hintClick, bool mixin)
+        {
+            bool timing = f.Contains("clock") || f.Contains("sleep");
+            bool rnd = f.Contains("random") || f.Contains("gaussian");
+            bool target = f.Contains("entityQuery") || f.Contains("raycast");
+            if (f.Contains("attackEntity") && target && (timing || rnd || f.Contains("attackCooldown")))
+                AddBehavior(behaviors, "Attacks entities from code with its own targeting and timing (aura / triggerbot behaviour)", cls);
+            if (f.Contains("setRotation") && f.Contains("atan2") && (target || f.Contains("eyePos") || f.Contains("lookVec")))
+                AddBehavior(behaviors, "Computes the angle to a target and rotates the player (aim assist / aimbot behaviour)", cls);
+            if (f.Contains("movePacket") && f.Contains("sendPacket") && (f.Contains("setVelocity") || f.Contains("setPos") || f.Contains("setOnGround")))
+                AddBehavior(behaviors, "Sends its own movement packets while moving the player (fly / nofall / blink / phase behaviour)", cls);
+            if (f.Contains("interactPacket") && f.Contains("sendPacket") && target)
+                AddBehavior(behaviors, "Sends attack/interact packets by hand (reach / aura / criticals behaviour)", cls);
+            if ((f.Contains("clickSlot") || f.Contains("clickPacket")) && (timing || rnd) && hintPvp)
+                AddBehavior(behaviors, "Moves inventory items by code with timed delays (auto totem / auto armor / inventory macro behaviour)", cls);
+            if (f.Contains("depthOff") && f.Contains("entityQuery") && f.Contains("boundingBox"))
+                AddBehavior(behaviors, "Draws boxes over entities with depth testing off (ESP / wallhack behaviour)", cls);
+            else if (f.Contains("renderEvent") && f.Contains("entityQuery") && f.Contains("boundingBox") && f.Contains("eyePos"))
+                AddBehavior(behaviors, "Draws lines/boxes to entities from the eye position (ESP / tracer behaviour)", cls);
+            if ((f.Contains("robot") || f.Contains("glfwInput") || f.Contains("nativeHook") || f.Contains("setKeyPressed")) && rnd && timing && hintClick)
+                AddBehavior(behaviors, "Generates input on its own with random delays (autoclicker / jitter / macro behaviour)", cls);
+            if (f.Contains("swapSlot") && f.Contains("attackEntity"))
+                AddBehavior(behaviors, "Switches hotbar slot and attacks in one class (weapon swap / mace swap behaviour)", cls);
+            if (mixin && f.Contains("reachDistance"))
+                AddBehavior(behaviors, "Hooks the interaction/reach distance (reach behaviour)", cls);
+        }
+
+        public void AddLang(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length > 600000) return;
+            try
+            {
+                MatchCollection mc = Regex.Matches(text, "\"((?:[^\"\\\\]|\\\\.){1,70})\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.){2,80})\"");
+                int n = 0;
+                foreach (Match m in mc)
+                {
+                    if (n++ > 800) break;
+                    HashSet<string> f = new HashSet<string>();
+                    if (Vocab(m.Groups[1].Value, f) > 0) { foreach (string v in f) vocab.Add(v); }
+                    AddString(m.Groups[2].Value.Replace("\\\"", "\"").Replace("\\\\", "\\"), 8);
+                }
+            }
+            catch (Exception) { }
+        }
+
+        public void Merge(ProfileBuilder o)
+        {
+            if (o == null) return;
+            total += o.total; shortNames += o.shortNames; junkNames += o.junkNames; enc += o.enc; mappedCount += o.mappedCount; failed += o.failed;
+            for (int i = 0; i < o.recs.Count && recs.Count < 12000; i++) recs.Add(o.recs[i]);
+            foreach (KeyValuePair<string, int> kv in o.pkgs) Bump(pkgs, kv.Key, kv.Value);
+            foreach (KeyValuePair<string, int> kv in o.methods) { if (!methods.ContainsKey(kv.Key) && methods.Count < 20000) methods[kv.Key] = kv.Value; }
+            foreach (KeyValuePair<string, int> kv in o.fields) { if (!fields.ContainsKey(kv.Key) && fields.Count < 10000) fields[kv.Key] = kv.Value; }
+            foreach (KeyValuePair<string, int> kv in o.strs) { if (!strs.ContainsKey(kv.Key) && strs.Count < 30000) strs[kv.Key] = kv.Value; }
+            foreach (KeyValuePair<string, int> kv in o.mixins) Bump(mixins, kv.Key, kv.Value);
+            foreach (KeyValuePair<string, int> kv in o.targets) Bump(targets, kv.Key, kv.Value);
+            foreach (KeyValuePair<string, int> kv in o.api) Bump(api, kv.Key, kv.Value);
+            foreach (string v in o.vocab) vocab.Add(v);
+            foreach (string m in o.mixinMethods) { if (mixinMethods.Count < 4000) mixinMethods.Add(m); }
+            foreach (string s in o.mapped) { if (mapped.Count < 8 && !mapped.Contains(s)) mapped.Add(s); }
+        }
+
+        public int Total { get { return total; } }
+        public int VocabCount { get { return vocab.Count; } }
+        public int MappedCount { get { return mappedCount; } }
+        public string[] VocabTerms() { List<string> l = new List<string>(vocab); l.Sort(string.CompareOrdinal); return l.ToArray(); }
+
+        public List<string[]> Behaviors()
+        {
+            List<string[]> res = new List<string[]>();
+            foreach (KeyValuePair<string, string[]> kv in behaviors)
+            {
+                int n = int.Parse(kv.Value[1]);
+                string detail = kv.Value[0] + (n > 1 ? " (+" + (n - 1) + " more)" : "");
+                res.Add(new string[] { kv.Key, detail });
+            }
+            Regex kb = new Regex("(?i)(velocity|knockback|takeknockback|applyknockback|deltamovement)");
+            Regex reach = new Regex("(?i)(getreachdistance|interactionrange|reachdistance|getattackrange|extendreach|entityreach)");
+            Regex cool = new Regex("(?i)(itemusecooldown|blockbreakingcooldown|attackcooldown|dodoattack|doitemuse|rightclickdelay|handleblockbreaking|updateblockbreakingprogress|hitdelay|blockhitdelay)");
+            Regex onground = new Regex("(?i)(isonground|setonground|onground)");
+            string kbHit = null; string reachHit = null; string coolHit = null; string groundHit = null;
+            List<string> probe = new List<string>(targets.Keys);
+            foreach (string m in mixinMethods) probe.Add(m);
+            foreach (string p in probe)
+            {
+                string q = p.StartsWith("at:", StringComparison.Ordinal) ? p.Substring(3) : p;
+                if (kbHit == null && kb.IsMatch(q)) kbHit = q;
+                if (reachHit == null && reach.IsMatch(q)) reachHit = q;
+                if (coolHit == null && cool.IsMatch(q)) coolHit = q;
+                if (groundHit == null && onground.IsMatch(q)) groundHit = q;
+            }
+            if (kbHit != null && mixins.Count > 0) res.Add(new string[] { "Hooks knockback/velocity handling with a mixin (anti-knockback / velocity behaviour)", kbHit });
+            if (reachHit != null && mixins.Count > 0) res.Add(new string[] { "Hooks the interaction/reach distance with a mixin (reach behaviour)", reachHit });
+            if (coolHit != null && mixins.Count > 0) res.Add(new string[] { "Hooks use/attack/break cooldowns with a mixin (fast place / fast break / autoclicker behaviour)", coolHit });
+            if (groundHit != null && mixins.Count > 0 && api.ContainsKey("movePacket")) res.Add(new string[] { "Hooks the on-ground flag and sends movement packets (nofall / fly behaviour)", groundHit });
+            int refl = 0;
+            if (api.ContainsKey("reflectInvoke")) refl++;
+            if (api.ContainsKey("setAccessible")) refl++;
+            if (api.ContainsKey("reflectLookup")) refl++;
+            if (mappedCount >= 3 && refl >= 1)
+                res.Add(new string[] { "Looks up obfuscated Minecraft names by string (field_/method_/f_/m_) and uses reflection - a way to avoid mixins and scanners", mappedCount + " such strings" });
+            return res;
+        }
+
+        private static void Esc(StringBuilder sb, string s)
+        {
+            sb.Append('"');
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '"') sb.Append("\\\"");
+                else if (c == '\\') sb.Append("\\\\");
+                else if (c < 32 || c > 126) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                else sb.Append(c);
+            }
+            sb.Append('"');
+        }
+        private static void StrArr(StringBuilder sb, string key, List<string> items, int maxLen)
+        {
+            sb.Append('"').Append(key).Append("\":[");
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                string s = items[i];
+                if (s.Length > maxLen) s = s.Substring(0, maxLen);
+                Esc(sb, s);
+            }
+            sb.Append(']');
+        }
+
+        public string Build(int maxChars)
+        {
+            int cClasses = 80, cMethods = 90, cFields = 60, cStrings = 120, cTargets = 40, cMixins = 40;
+            string json = null;
+            for (int round = 0; round < 8; round++)
+            {
+                json = BuildOnce(cClasses, cMethods, cFields, cStrings, cTargets, cMixins);
+                if (json.Length <= maxChars) break;
+                cClasses = cClasses * 3 / 4; cMethods = cMethods * 3 / 4; cFields = cFields * 3 / 4; cStrings = cStrings * 3 / 4; cTargets = cTargets * 3 / 4; cMixins = cMixins * 3 / 4;
+            }
+            return json;
+        }
+        private string BuildOnce(int cClasses, int cMethods, int cFields, int cStrings, int cTargets, int cMixins)
+        {
+            StringBuilder sb = new StringBuilder(9000);
+            sb.Append('{');
+            List<KeyValuePair<string, int>> pk = new List<KeyValuePair<string, int>>(pkgs);
+            pk.Sort(delegate(KeyValuePair<string, int> x, KeyValuePair<string, int> y)
+            {
+                int c = y.Value.CompareTo(x.Value);
+                return c != 0 ? c : string.CompareOrdinal(x.Key, y.Key);
+            });
+            sb.Append("\"packages\":[");
+            for (int i = 0; i < pk.Count && i < 16; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append("{\"p\":"); Esc(sb, pk[i].Key.Length > 100 ? pk[i].Key.Substring(0, 100) : pk[i].Key); sb.Append(",\"n\":").Append(pk[i].Value).Append('}');
+            }
+            sb.Append("],");
+            List<Rec> sorted = new List<Rec>(recs);
+            sorted.Sort(delegate(Rec x, Rec y)
+            {
+                int c = y.Score.CompareTo(x.Score);
+                return c != 0 ? c : string.CompareOrdinal(x.Name, y.Name);
+            });
+            List<string> cl = new List<string>();
+            for (int i = 0; i < sorted.Count && cl.Count < cClasses; i++)
+            {
+                Rec r = sorted[i];
+                if (r.Mixin) continue;
+                string s = r.Name;
+                if (r.Super != null && r.Super.Length > 0 && r.Super != "java/lang/Object") s = s + " < " + r.Super;
+                cl.Add(s);
+            }
+            StrArr(sb, "classes", cl, 90); sb.Append(',');
+            List<string> mx = new List<string>(); Top(mixins, cMixins, 1, mx);
+            StrArr(sb, "mixins", mx, 90); sb.Append(',');
+            List<string> tg = new List<string>(); Top(targets, cTargets, 1, tg);
+            StrArr(sb, "mixinTargets", tg, 100); sb.Append(',');
+            List<string> ml = new List<string>(); Top(methods, cMethods, 1, ml);
+            StrArr(sb, "methods", ml, 50); sb.Append(',');
+            List<string> fd = new List<string>(); Top(fields, cFields, 1, fd);
+            StrArr(sb, "fields", fd, 50); sb.Append(',');
+            List<string> st = new List<string>(); Top(strs, cStrings, 1, st);
+            StrArr(sb, "strings", st, 60); sb.Append(',');
+            sb.Append("\"mappedReflection\":{\"count\":").Append(mappedCount).Append(',');
+            StrArr(sb, "sample", mapped, 40); sb.Append("},");
+            sb.Append("\"api\":{");
+            List<KeyValuePair<string, int>> ap = new List<KeyValuePair<string, int>>(api);
+            ap.Sort(delegate(KeyValuePair<string, int> x, KeyValuePair<string, int> y) { return string.CompareOrdinal(x.Key, y.Key); });
+            for (int i = 0; i < ap.Count && i < 60; i++)
+            {
+                if (i > 0) sb.Append(',');
+                Esc(sb, ap[i].Key); sb.Append(':').Append(ap[i].Value);
+            }
+            sb.Append("},");
+            List<string> vl = new List<string>(vocab); vl.Sort(string.CompareOrdinal);
+            StrArr(sb, "vocab", vl, 40); sb.Append(',');
+            int pctShort = total > 0 ? (int)Math.Round(100.0 * shortNames / total) : 0;
+            int pctJunk = total > 0 ? (int)Math.Round(100.0 * junkNames / total) : 0;
+            sb.Append("\"obfuscation\":{\"shortNamePct\":").Append(pctShort).Append(",\"junkNamePct\":").Append(pctJunk).Append(",\"encryptedStrings\":").Append(enc).Append("},");
+            sb.Append("\"totalClasses\":").Append(total);
+            sb.Append('}');
+            return sb.ToString();
+        }
+    }
+}
+'@
+
+$script:ProfilerOk = $false
+$script:ProfilerError = $null
+try {
+    if (-not ('CactusHacksDetector.ProfileBuilder' -as [type])) { Add-Type -TypeDefinition $script:ProfilerSource -Language CSharp -ErrorAction Stop }
+    $script:ProfilerOk = $true
+} catch { $script:ProfilerError = $_.Exception.Message }
+
 $script:IsAdmin = $false
 try {
     $wid = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -625,11 +1395,11 @@ function Get-HackKind([string]$Name, [string]$Cat) {
 
 $Sig = @{
 
-    Clients = '(?i)(liquid[-_ ]?bounce|meteor[-_ ]?client|meteordevelopment|(?<![a-z])wurst(?:[-_ ]?client)?(?![a-z])|net/wurstclient|aristois|impact[-_ ]?client|future[-_ ]?client|rusher[-_ ]?hack|thunder[-_ ]?hack|pandaware|(?<![a-z])asteria(?![a-z])|(?<![a-z])xenon[-_ ]?client|vape[-_ ]?(?:v4|lite|client)|(?<![a-z])vapev4|doomsday[-_ ]?client|prestige[-_ ]?client|(?<![a-z])konas(?![a-z])|3arthh4ck|salhack|bleach[-_ ]?hack|coffee[-_ ]?client|inertia[-_ ]?client|sigma[-_ ]?client|novoline|exhibition[-_ ]?client|astolfo|raven[-_ ]?b[0-9s]|lunar[-_ ]?cheat|fdp[-_ ]?client|(?<![a-z])nodus(?![a-z])|kami[-_ ]?blue|forgehax|tenacity[-_ ]?client|rise[-_ ]?client|slinky[-_ ]?client|moonlight[-_ ]?client|zeroday[-_ ]?client|dortware|hanabi[-_ ]?client|augustus[-_ ]?client|trollhack|gamesense[-_ ]?client|xulu[-_ ]?client|cosmos[-_ ]?client|boze[-_ ]?client|opai[-_ ]?client|cat[-_ ]?lean|argon[-_ ]?client|gypsy[-_ ]?client|virgin[-_ ]?client|grim[-_ ]?client|nova[-_ ]?client|(?<![a-z])hellion(?![a-z])|dqrkis|lvstrng|vape\.gg|intent\.store|rise\.today|club[/.]maxstats|wtf[/.]moonlight|me[/.]zeroeightsix|net[/.]ccbluex|today[/.]opai|com[/.]alan[/.]clients|dev[.]gambleclient|xyz[/.]greaj|(?:dev|skid)[/.]krypton)'
+    Clients = '(?i)(liquid[-_ ]?bounce|meteor[-_ ]?client|meteordevelopment|(?<![a-z])wurst(?:[-_ ]?client)?(?![a-z])|net/wurstclient|aristois|impact[-_ ]?client|future[-_ ]?client|rusher[-_ ]?hack|thunder[-_ ]?hack|pandaware|(?<![a-z])asteria(?![a-z])|(?<![a-z])xenon[-_ ]?client|vape[-_ ]?(?:v4|lite|client)|(?<![a-z])vapev4|doomsday[-_ ]?client|prestige[-_ ]?client|(?<![a-z])konas(?![a-z])|3arthh4ck|salhack|bleach[-_ ]?hack|coffee[-_ ]?client|inertia[-_ ]?client|sigma[-_ ]?client|novoline|exhibition[-_ ]?client|astolfo[-_ ]?(?:client|hack|utils|ware)|(?:club|dev|me|net|com)[/.]astolfo|raven[-_ ]?b[0-9s]|lunar[-_ ]?cheat|fdp[-_ ]?client|(?<![a-z])nodus(?![a-z])|kami[-_ ]?blue|forgehax|tenacity[-_ ]?client|rise[-_ ]?client|slinky[-_ ]?client|moonlight[-_ ]?client|zeroday[-_ ]?client|dortware|hanabi[-_ ]?client|augustus[-_ ]?client|trollhack|gamesense[-_ ]?client|xulu[-_ ]?client|cosmos[-_ ]?client|boze[-_ ]?client|opai[-_ ]?client|cat[-_ ]?lean|argon[-_ ]?client|gypsy[-_ ]?client|virgin[-_ ]?client|grim[-_ ]?client|nova[-_ ]?client|(?<![a-z])hellion(?![a-z])|phobos[-_ ]?(?:client|hack|plus)|me[/.]earth[/.]phobos|wexside|wave[-_ ]?client|mio[-_ ]?client|lemon[-_ ]?client|ares[-_ ]?client|entropy[-_ ]?client|celestial[-_ ]?client|akira[-_ ]?client|rinor[-_ ]?client|ozone[-_ ]?client|tarasande|azura[-_ ]?client|drip[-_ ]?client|remix[-_ ]?client|flux[-_ ]?client|wolfram[-_ ]?client|meteor[-_ ]?rejects|trouser[-_ ]?streak|numby[-_ ]?hack|anti[-_ ]?cope|banana[-_ ]?plus|pyro[-_ ]?client|dqrkis|lvstrng|vape\.gg|intent\.store|rise\.today|club[/.]maxstats|wtf[/.]moonlight|me[/.]zeroeightsix|net[/.]ccbluex|today[/.]opai|com[/.]alan[/.]clients|dev[.]gambleclient|xyz[/.]greaj|(?:dev|skid)[/.]krypton)'
 
-    Modules = '(?i)(kill[-_]?aura|crystal[-_]?aura|auto[-_]?crystal|trigger[-_]?bot|aim[-_]?(?:assist|bot)|silent[-_]?aim|anchor[-_]?macro|auto[-_]?(?:totem|clicker|pearl|armor|anchor|sword|pot)|no[-_]?(?:knockback|fall|slow)|fly[-_]?hack|speed[-_]?hack|x[-_]?ray[-_]?hack|player[-_]?esp|chest[-_]?(?:esp|steal)|cheststealer|fast[-_]?(?:place|break)|scaffold(?!ing)|hitbox(?:es)?[-_]?(?:expand|hack)|reach[-_]?(?:hack|extend)|velocity[-_]?(?:hack|cancel)|bunny[-_]?hop|jesus[-_]?hack|bed[-_]?aura|jitter[-_]?click(?:er)?|auto[-_]?hit|hit[-_]?select|w[-_]?tap|auto[-_]?(?:double[-_]?hand|dtap|neth[-_]?pot|tpa|firework|breach|inventory[-_]?totem)|stun[-_]?slam|(?:mace|spear|elytra)[-_]?swap|shield[-_]?(?:breaker|disabler)|axe[-_]?spam|web[-_]?macro|key[-_]?pearl|(?:hover|legit)[-_]?totem|ping[-_]?spoof|anti[-_]?miss[-_]?click|lag[-_]?reach|pop[-_]?switch|sprint[-_]?reset|fake[-_]?inv(?![a-z])|pack[-_]?spoof|(?<![a-z])(?:double|safe|air)[-_]?anchor|anchor[-_]?aura|loot[-_]?yeeter|walsk?y[-_]?(?:crystal[-_]?)?optimizer|grim[-_]?(?:velocity|disabler)|target[-_]?strafe|(?:boat|packet)[-_]?fly)'
+    Modules = '(?i)(kill[-_ ]?aura|crystal[-_ ]?aura|auto[-_ ]?crystal|trigger[-_ ]?bot|aim[-_ ]?(?:assist|bot)|silent[-_ ]?aim|anchor[-_ ]?macro|auto[-_ ]?(?:totem|clicker|pearl|armor|anchor|sword|pot)|no[-_ ]?(?:knockback|fall(?:[-_ ]?damage)?|slow(?:[-_ ]?down)?)(?-i:(?![a-z]))|fly[-_ ]?hack|speed[-_ ]?hack|x[-_ ]?ray[-_ ]?hack|player[-_ ]?esp|chest[-_ ]?(?:esp|steal)|cheststealer|fast[-_ ]?(?:place|break)|scaffold(?!ing)|hitbox(?:es)?[-_ ]?(?:expand|hack)|reach[-_ ]?(?:hack|extend)|velocity[-_ ]?(?:hack|cancel)|bunny[-_ ]?hop|jesus[-_ ]?hack|bed[-_ ]?aura|jitter[-_ ]?click(?:er)?|auto[-_ ]?hit(?-i:(?![a-z]))|hit[-_ ]?select(?-i:(?![a-z]))|(?<![a-z0-9_])w[-_ ]?tap(?![a-z])|auto[-_ ]?(?:double[-_ ]?hand|dtap|neth[-_ ]?pot|tpa|firework|breach|inventory[-_ ]?totem)|stun[-_ ]?slam|(?:mace|spear|elytra)[-_ ]?swap|shield[-_ ]?(?:breaker|disabler)|axe[-_ ]?spam|web[-_ ]?macro|key[-_ ]?pearl|(?:hover|legit)[-_ ]?totem|ping[-_ ]?spoof|anti[-_ ]?miss[-_ ]?click|lag[-_ ]?reach|pop[-_ ]?switch|sprint[-_ ]?reset|fake[-_ ]?inv(?![a-z])|pack[-_ ]?spoof|(?<![a-z])(?:double|safe|air)[-_ ]?anchor|anchor[-_ ]?aura|loot[-_ ]?yeeter|walsk?y[-_ ]?(?:crystal[-_ ]?)?optimizer|grim[-_ ]?(?:velocity|disabler)|target[-_ ]?strafe|(?:boat|packet)[-_ ]?fly|(?:player|entity|storage|block|ore|item|mob)[-_ ]?esp(?-i:(?![a-z]))|cave[-_ ]?finder|tp[-_ ]?aura|attack[-_ ]?aura|click[-_ ]?aura|multi[-_ ]?aura|mace[-_ ]?(?:aura|killer|spam)|no[-_ ]?jump[-_ ]?delay|anti[-_ ]?web|fake[-_ ]?lag|lag[-_ ]?switch|timer[-_ ]?hack|packet[-_ ]?(?:cancel|delay)(?-i:(?![a-z]))|inv(?:entory)?[-_ ]?(?:cleaner|stealer)|auto[-_ ]?miner|legit[-_ ]?(?:crystal|anchor)|hit[-_ ]?crystal|(?:rotation|packet)[-_ ]?spoof)'
 
-    ModulesWeakLeaf = '(?i)^(esp|xray|fullbright|nametags|fly|speed|reach|velocity|criticals|antiknockback|autosprint|step|phase|blink|nofall|freecam|tracers|nuker|timer|sneak|spider|jesus|longjump|highjump|airjump|waterwalk|strafe|bhop|safewalk|antikb|hitboxes|aimassist|killaura|triggerbot|autoclicker)(module|hack|mod)?$'
+    ModulesWeakLeaf = '(?i)^(esp|xray|fullbright|nametags|fly|speed|reach|velocity|criticals|antiknockback|autosprint|step|phase|blink|nofall|freecam|tracers|nuker|timer|sneak|spider|jesus|longjump|highjump|airjump|waterwalk|strafe|bhop|safewalk|antikb|hitboxes|aimassist|killaura|triggerbot|autoclicker|scaffold|noslow|nofalldamage|autototem|autoarmor|autopot|autopearl|clicker|aimbot|antibot|autoblock|fastplace|fastbreak|reachhack|autocrystal|crystalaura|bedaura|anchoraura|autoanchor|noknockback|autodtap|wtap|hitselect|stunslam|maceaura|autoweb|antiweb|invcleaner|chestesp|playeresp|autominer|tpaura|clickaura|attackaura|multiaura)(module|hack|mod)?$'
     Bypass  = '(?i)(grim[-_]?bypass|vulcan[-_]?bypass|watchdog[-_]?bypass|matrix[-_]?bypass|nocheat[-_]?bypass|anticheat[-_]?bypass|hypixel[-_]?bypass|spartan[-_]?bypass|verus[-_]?bypass|intave[-_]?bypass)'
 
     Markers = '(?i)(org[/.]chainlibs|LicenseCheckMixin|phantom-refmap|cheat-refmap|client-refmap|aHR0cDovL2FwaS5ub3ZhY2xpZW50LmxvbC93ZWJob29rLnR4dA|api\.novaclient\.lol|dqrkis\.xyz)'
@@ -638,7 +1408,9 @@ $Sig = @{
 
     Labels  = '(?i)(place chance|break chance|stop on kill|explode delay|explode chance|glowstone delay|glowstone chance|activates above|click simulation|silent rotations|anchor macro|totem slot|strict one-tick|mace priority|horizontal aim speed|vertical aim speed|no count glitch|only charge|require hold axe|min totems|min pearls|totem first|drop interval|stay open for|predict crystals|particle chance)'
 
-    Obfuscators = '(?i)(ALLATORI|(?<![a-z])ZKM[0-9A-Za-z]*|Zelix|Stringer(?:Java)?Obfuscator|com[/.]licel|paramorphism|skidfuscator|itzsomebody|branchlock|com[/.]preemptive|caesium|binscure|(?<![a-z])jnic(?![a-z])|qprotect|superblaze|bozar|superblaubeere|scuti[-_.]?obf|smoke[-_.]?obf)'
+    LabelsWeak = '(?i)(target players|target mobs|target animals|target invisible|ignore friends|ignore teammates|ignore team|min cps|max cps|click delay|hit delay|attack delay|reach distance|attack range|rotation speed|aim smoothing|fov check|through walls|require weapon|only critical|crit mode|swap delay|trigger delay|totem delay|pearl delay|anchor delay|crystal delay|place delay|break delay|auto switch|silent swap|humanize|jitter range)'
+
+    Obfuscators = '(?i)(ALLATORI|(?<![a-z])ZKM[0-9A-Za-z]*|Zelix|Stringer(?:Java)?Obfuscator|com[/.]licel|paramorphism|skidfuscator|itzsomebody|branchlock|com[/.]preemptive|caesium|binscure|(?<![a-z])jnic(?![a-z])|qprotect|superblaze|bozar[-_.]?(?:obf|crypt)[a-z]*|superblaubeere|scuti[-_.]?obf|smoke[-_.]?obf)'
 
     Malware = @(
         @{ Rule='Discord webhook';          Sev='high';   Rx='(?i)discord(app)?\.com/api/webhooks/' }
@@ -670,7 +1442,7 @@ $Sig = @{
     FakeIds = @('sodium','lithium','iris','fabric-api','fabric','modmenu','optifine','starlight','phosphor','ferritecore','entityculling','indium','lazydfu','krypton','memoryleakfix','c2me-fabric','smoothboot-fabric','immediatelyfast','noisium','threadtweak')
 }
 $Rx = @{}
-foreach ($k in 'Clients', 'Modules', 'ModulesWeakLeaf', 'Bypass', 'Markers', 'Libs', 'Obfuscators', 'Labels') { $Rx[$k] = New-Object Regex($Sig[$k], 'Compiled') }
+foreach ($k in 'Clients', 'Modules', 'ModulesWeakLeaf', 'Bypass', 'Markers', 'Libs', 'Obfuscators', 'Labels', 'LabelsWeak') { $Rx[$k] = New-Object Regex($Sig[$k], 'Compiled') }
 $MalwareRx = foreach ($m in $Sig.Malware) { [pscustomobject]@{ Rule = $m.Rule; Sev = $m.Sev; Rx = (New-Object Regex($m.Rx, 'Compiled')) } }
 
 $BannedMods = [ordered]@{
@@ -1169,6 +1941,14 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
     $majors = @{}
     $magicBudget = 3000
     $labelHits = @{}
+    $labelWeak = @{}
+    $pb = $null
+    if ($script:ProfilerOk) { $pb = New-Object CactusHacksDetector.ProfileBuilder }
+    $profCount = 0
+    $langDone = 0
+    $resNames = New-Object System.Collections.Generic.List[string]
+    $moduleDirs = @{}
+    $moduleCount = 0
 
     foreach ($metaName in 'fabric.mod.json', 'META-INF/jarjar/metadata.json') {
         $me = $Zip.GetEntry($metaName)
@@ -1194,7 +1974,10 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
         $leaf = $name.Substring($name.LastIndexOf('/') + 1)
         $base = ($leaf -replace '\.class$', '') -replace '\$.*$', ''
 
-        if ($isClass) { $classNames.Add(($name -replace '\.class$', '')) }
+        if ($isClass) {
+            $classNames.Add(($name -replace '\.class$', ''))
+            if ($name -match '(?i)(^|/)(modules?|hacks?|cheats?)/(?:([^/]+)/)?[^/$]+\.class$') { $moduleCount++; if ($Matches[3]) { $moduleDirs[$Matches[3].ToLower()] = $true } }
+        } elseif ($Depth -eq 0 -and $resNames.Count -lt 400 -and $ext -notin '.png', '.ogg', '.jpg', '.jpeg', '.mcmeta', '.wav', '.gif', '.ttf', '.otf', '.nbt', '.bmp', '.fsh', '.vsh', '.glsl') { $resNames.Add($name) }
         foreach ($k in 'Clients', 'Modules', 'Bypass', 'Markers', 'Libs', 'Obfuscators') {
             $m = $Rx[$k].Match($name)
             if ($m.Success) {
@@ -1234,6 +2017,9 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
                     $nz = New-Object IO.Compression.ZipArchive((New-Object IO.MemoryStream(, $nb)), 'Read')
                     $sub = Scan-Archive $nz $where ($Depth + 1) $State
                     foreach ($f in $sub.Findings) { $findings.Add($f) }
+                    if ($pb -and $sub.Prof -and $sub.ClassCount -le 80) { $pb.Merge($sub.Prof) }
+                    $nestedMeta = Get-ModMeta $nz
+                    [void]$State.Nested.Add([pscustomobject]@{ File = (Limit-Text $name 100); Classes = [int]$sub.ClassCount; Id = $(if ($nestedMeta) { $nestedMeta.Id } else { $null }) })
                     $State.NestedJars++
                     if ($isNestDir) {
                         if (-not $declared.ContainsKey($name.ToLower())) { $findings.Add((New-Finding 'medium' 'bypass' 'Nested jar not declared in fabric.mod.json / jarjar metadata' $name $where)) }
@@ -1288,6 +2074,7 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
         if (-not $bytes) { continue }
         $State.BytesScanned += $bytes.Length
         $text = $Latin1.GetString($bytes)
+        if ($pb -and $Depth -eq 0 -and $langDone -lt 2 -and $ext -eq '.json' -and $name -match '(?i)^assets/[^/]+/lang/[a-z_]+\.json$') { $langDone++; $pb.AddLang([Text.Encoding]::UTF8.GetString($bytes)) }
 
         foreach ($mr in $MalwareRx) {
             $key = "mw|$($mr.Rule)"
@@ -1315,6 +2102,7 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
             $findings.Add((New-Finding 'high' 'cheat-string' 'Hack-client marker string' "'$($mk.Value)' inside file" $where))
         }
         foreach ($lm in $Rx.Labels.Matches($text)) { $labelHits[$lm.Value.ToLower()] = $true }
+        foreach ($lw in $Rx.LabelsWeak.Matches($text)) { $labelWeak[$lw.Value.ToLower()] = $true }
         $ob = $Rx.Obfuscators.Match($text)
         if ($ob.Success -and -not $seen['obf']) { $seen['obf'] = $true; $findings.Add((New-Finding 'medium' 'obfuscation' 'Obfuscator fingerprint' "'$($ob.Value)' inside file" $where)) }
         $fw = $FullwidthRx.Match($text)
@@ -1324,6 +2112,8 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
             $findings.Add((New-Finding 'high' 'cheat-string' 'Fullwidth Unicode label (hides module names)' "decodes to '$decoded'" $where))
             Add-Hack $State $decoded 'hidden label' "fullwidth label in $name" 'string'
         }
+
+        if ($isClass -and $pb -and $profCount -lt 8000) { $profCount++; [void]$pb.AddClass($bytes, $name) }
 
         if ($isClass -and $script:Native -and $State.ClassesParsed -lt 8000) {
             $State.ClassesParsed++
@@ -1349,6 +2139,25 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
 
     if ($labelHits.Count -ge 4) {
         $findings.Add((New-Finding 'high' 'cheat-string' 'Cheat module setting labels' ((@($labelHits.Keys) | Select-Object -First 6) -join ', ') $Label))
+    } elseif (($labelHits.Count + $labelWeak.Count) -ge 5) {
+        $findings.Add((New-Finding 'medium' 'cheat-string' 'Setting labels typical of combat/utility cheat modules' ((@($labelHits.Keys) + @($labelWeak.Keys) | Select-Object -First 6) -join ', ') $Label))
+    }
+
+    if ($moduleCount -ge 12 -and $moduleDirs.Count -ge 2) {
+        $findings.Add((New-Finding 'medium' 'cheat-name' 'Hack-client style module tree (modules/<category>/<Module>)' ("{0} classes in {1} module folders: {2}" -f $moduleCount, $moduleDirs.Count, ((@($moduleDirs.Keys) | Select-Object -First 6) -join ', ')) $Label))
+    }
+
+    if ($pb) {
+        foreach ($bh in $pb.Behaviors()) {
+            $findings.Add((New-Finding 'medium' 'cheat-behavior' $bh[0] (Limit-Text $bh[1] 160) $Label))
+        }
+        $vt = @($pb.VocabTerms())
+        if ($vt.Count -ge 3) {
+            $findings.Add((New-Finding 'medium' 'cheat-name' 'Cheat-module vocabulary in class, method and string names' ("{0} terms: {1}" -f $vt.Count, (($vt | Select-Object -First 10) -join ', ')) $Label))
+        }
+        if ($vt.Count -ge 4 -and $Depth -eq 0) {
+            foreach ($vh in ($vt | Select-Object -First 12)) { Add-Hack $State $vh '' 'name found in class, method or string names' 'string' }
+        }
     }
 
     if ($weak.Count -ge 3) {
@@ -1382,7 +2191,7 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
         }
     }
 
-    [pscustomobject]@{ Findings = $findings; ClassCount = $classNames.Count }
+    [pscustomobject]@{ Findings = $findings; ClassCount = $classNames.Count; Prof = $pb; Res = $resNames }
 }
 
 function Get-ModrinthMatches([hashtable]$Sha1ToPath) {
@@ -1430,38 +2239,97 @@ function Get-DownloadSource([string]$Path) {
 }
 
 function Get-ModMeta($Zip) {
-    $meta = [ordered]@{ Id = $null; Name = $null; Version = $null; Loader = $null }
+    $meta = [ordered]@{ Id = $null; Name = $null; Version = $null; Loader = $null; Authors = @(); Description = $null; Homepage = $null; Entrypoints = @(); MixinConfigs = @(); Depends = @() }
     $fab = $Zip.GetEntry('fabric.mod.json'); $qlt = $Zip.GetEntry('quilt.mod.json')
     $toml = $Zip.GetEntry('META-INF/mods.toml'); if (-not $toml) { $toml = $Zip.GetEntry('META-INF/neoforge.mods.toml') }
     $old = $Zip.GetEntry('mcmod.info')
     $read = { param($en) $b = Read-EntryBytes $en 2MB; if ($b) { [Text.Encoding]::UTF8.GetString($b) } }
+    $nameOf = { param($v) if ($v -is [string]) { $v } elseif ($v -and $v.name) { [string]$v.name } else { $null } }
     if ($fab) {
         $t = & $read $fab; $meta.Loader = 'fabric'
         if ($t -match '"id"\s*:\s*"([^"]+)"') { $meta.Id = $Matches[1] }
         if ($t -match '"name"\s*:\s*"([^"]+)"') { $meta.Name = $Matches[1] }
         if ($t -match '"version"\s*:\s*"([^"]+)"') { $meta.Version = $Matches[1] }
+        $j = $null
+        try { $j = $t | ConvertFrom-Json -ErrorAction Stop } catch {}
+        if ($j) {
+            $meta.Authors = @(@($j.authors) | ForEach-Object { & $nameOf $_ } | Where-Object { $_ } | Select-Object -First 6)
+            if ($j.description) { $meta.Description = Limit-Text ([string]$j.description) 240 }
+            if ($j.contact -and $j.contact.homepage) { $meta.Homepage = Limit-Text ([string]$j.contact.homepage) 120 }
+            elseif ($j.contact -and $j.contact.sources) { $meta.Homepage = Limit-Text ([string]$j.contact.sources) 120 }
+            $eps = New-Object System.Collections.Generic.List[string]
+            if ($j.entrypoints) {
+                foreach ($pr in $j.entrypoints.PSObject.Properties) {
+                    foreach ($v in @($pr.Value)) {
+                        $sv = $null
+                        if ($v -is [string]) { $sv = $v } elseif ($v -and $v.value) { $sv = [string]$v.value }
+                        if ($sv) { $eps.Add(('{0}:{1}' -f $pr.Name, $sv)) }
+                    }
+                }
+            }
+            $meta.Entrypoints = @($eps | Select-Object -First 10)
+            $meta.MixinConfigs = @(@($j.mixins) | ForEach-Object { if ($_ -is [string]) { $_ } elseif ($_ -and $_.config) { [string]$_.config } } | Where-Object { $_ } | Select-Object -First 8)
+            if ($j.depends) { $meta.Depends = @($j.depends.PSObject.Properties.Name | Select-Object -First 15) }
+        }
     } elseif ($qlt) {
         $t = & $read $qlt; $meta.Loader = 'quilt'
         if ($t -match '"id"\s*:\s*"([^"]+)"') { $meta.Id = $Matches[1] }
         if ($t -match '"version"\s*:\s*"([^"]+)"') { $meta.Version = $Matches[1] }
+        if ($t -match '"name"\s*:\s*"([^"]+)"') { $meta.Name = $Matches[1] }
+        if ($t -match '"description"\s*:\s*"([^"]+)"') { $meta.Description = Limit-Text $Matches[1] 240 }
     } elseif ($toml) {
         $t = & $read $toml; $meta.Loader = 'forge/neoforge'
         if ($t -match 'modId\s*=\s*"([^"]+)"') { $meta.Id = $Matches[1] }
         if ($t -match 'displayName\s*=\s*"([^"]+)"') { $meta.Name = $Matches[1] }
         if ($t -match '(?m)^\s*version\s*=\s*"([^"]+)"') { $meta.Version = $Matches[1] }
+        if ($t -match '(?m)^\s*authors\s*=\s*"([^"]+)"') { $meta.Authors = @($Matches[1]) }
+        if ($t -match "(?s)description\s*=\s*'''(.*?)'''") { $meta.Description = Limit-Text $Matches[1] 240 }
+        elseif ($t -match '(?m)^\s*description\s*=\s*"([^"]*)"') { $meta.Description = Limit-Text $Matches[1] 240 }
+        if ($t -match '(?m)^\s*displayURL\s*=\s*"([^"]+)"') { $meta.Homepage = Limit-Text $Matches[1] 120 }
+        $ids = @([regex]::Matches($t, '(?m)modId\s*=\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+        if ($ids.Count -gt 1) { $meta.Depends = @($ids | Select-Object -Skip 1 -First 15) }
+        $meta.MixinConfigs = @([regex]::Matches($t, 'config\s*=\s*"([^"]+\.json)"') | ForEach-Object { $_.Groups[1].Value } | Select-Object -First 8)
     } elseif ($old) {
         $t = & $read $old; $meta.Loader = 'legacy forge'
         if ($t -match '"modid"\s*:\s*"([^"]+)"') { $meta.Id = $Matches[1] }
         if ($t -match '"name"\s*:\s*"([^"]+)"') { $meta.Name = $Matches[1] }
+        if ($t -match '"description"\s*:\s*"([^"]+)"') { $meta.Description = Limit-Text $Matches[1] 240 }
+        if ($t -match '"url"\s*:\s*"([^"]+)"') { $meta.Homepage = Limit-Text $Matches[1] 120 }
+        if ($t -match '"authorList"\s*:\s*\[([^\]]*)\]') { $meta.Authors = @([regex]::Matches($Matches[1], '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value } | Select-Object -First 6) }
     }
     [pscustomobject]$meta
 }
 
+function New-ModProfile($Prof, $Meta, $ResNames, $State) {
+    try {
+        $p = ConvertFrom-Json (Hide-User ($Prof.Build(7000)))
+        $m = [ordered]@{ id = $null; name = $null; version = $null; loader = $null; authors = @(); description = $null; homepage = $null; entrypoints = @(); mixinConfigs = @(); depends = @() }
+        if ($Meta) {
+            $m.id = $Meta.Id; $m.name = $Meta.Name; $m.version = $Meta.Version; $m.loader = $Meta.Loader
+            $m.authors = @($Meta.Authors); $m.description = $Meta.Description; $m.homepage = $Meta.Homepage
+            $m.entrypoints = @($Meta.Entrypoints); $m.mixinConfigs = @($Meta.MixinConfigs); $m.depends = @($Meta.Depends)
+        }
+        $p | Add-Member -NotePropertyName meta -NotePropertyValue $m -Force
+        $first = New-Object System.Collections.Generic.List[string]
+        $rest = New-Object System.Collections.Generic.List[string]
+        foreach ($rn in @($ResNames)) {
+            if (-not $rn) { continue }
+            if ($rn -match '(?i)\.mixins?\.json$|\.accesswidener$|accesstransformer\.cfg$') { $first.Add($rn) }
+            elseif ($rn -notmatch '(?i)^(assets/|META-INF/(MANIFEST|services/|maven/|versions/)|.*\.(SF|RSA|DSA|kotlin_module|kotlin_builtins)$)') { $rest.Add($rn) }
+        }
+        $resOut = @((@($first) + @($rest)) | Select-Object -Unique | Select-Object -First 30 | ForEach-Object { Limit-Text $_ 90 })
+        $p | Add-Member -NotePropertyName resources -NotePropertyValue $resOut -Force
+        $nestedOut = @(@($State.Nested) | Select-Object -First 8 | ForEach-Object { [ordered]@{ file = $_.File; classes = [int]$_.Classes; id = $_.Id } })
+        $p | Add-Member -NotePropertyName nested -NotePropertyValue $nestedOut -Force
+        return $p
+    } catch { return $null }
+}
+
 function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
     $sha1 = $Hashes.Sha1
-    $state = [pscustomobject]@{ NestedJars = 0; BytesScanned = 0; ClassesParsed = 0; Hacks = @{}; Keys = (New-Object System.Collections.Generic.List[object]) }
+    $state = [pscustomobject]@{ NestedJars = 0; BytesScanned = 0; ClassesParsed = 0; Hacks = @{}; Keys = (New-Object System.Collections.Generic.List[object]); Nested = (New-Object System.Collections.Generic.List[object]) }
     $findings = New-Object System.Collections.Generic.List[object]
-    $meta = $null; $classCount = 0; $err = $null; $skipped = $false
+    $meta = $null; $classCount = 0; $err = $null; $skipped = $false; $prof = $null; $resNames = $null
 
     $verified = [bool]($Modrinth -and $sha1 -and $Modrinth.ContainsKey($sha1))
     $fs = $null; $zip = $null
@@ -1474,6 +2342,8 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
             $r = Scan-Archive $zip $File.Name 0 $state
             foreach ($f in $r.Findings) { $findings.Add($f) }
             $classCount = $r.ClassCount
+            $prof = $r.Prof
+            $resNames = $r.Res
         }
     } catch { $err = $_.Exception.Message }
     finally { if ($zip) { $zip.Dispose() }; if ($fs) { $fs.Dispose() } }
@@ -1491,6 +2361,7 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
     foreach ($hv in $Hashes.Sha1, $Hashes.Sha256, $Hashes.Md5) {
         if ($hv -and $script:BadHashes.ContainsKey($hv)) { $findings.Add((New-Finding 'high' 'cheat-name' 'File hash is on the known-bad list' $script:BadHashes[$hv] $File.Name)) }
     }
+    if (-not $skipped -and -not $err -and -not $inactive -and $meta -and -not $meta.Id -and $classCount -gt 0) { $findings.Add((New-Finding 'low' 'metadata' 'No mod metadata (fabric.mod.json / mods.toml / mcmod.info)' $File.Name $File.Name)) }
     if ($inactive -and -not $err) { $findings.Add((New-Finding 'low' 'inactive' 'Inactive copy (the game does not load this file)' $File.Name $File.Name)) }
     elseif ($File.Extension -ne '.jar' -and -not $err) { $findings.Add((New-Finding 'medium' 'bypass' 'Archive hiding under a non-.jar name in the mods folder' $File.Name $File.Name)) }
     if ($meta -and $meta.Id -and ($Sig.FakeIds -contains $meta.Id.ToLower()) -and -not $verified -and -not $NoOnline) {
@@ -1542,13 +2413,26 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
         }
     }
     $strongHacks = @($state.Hacks.Values | Where-Object { $_.Strength -notin 'weak', 'keybinding' })
-    if ($strongHacks.Count -ge 3) {
+    $codeHacks = @($state.Hacks.Values | Where-Object { $_.Strength -in 'name', 'class', 'client', 'code' })
+    if ($strongHacks.Count -ge 3 -or $codeHacks.Count -ge 2) {
         $findings.Add((New-Finding 'high' 'cheat-name' 'Module list consistent with a hack client' ("{0} modules: {1}" -f $strongHacks.Count, ((@($strongHacks | Select-Object -First 8 | ForEach-Object { $_.Name })) -join ', ')) $File.Name))
+    }
+
+    $behFindings = @($findings | Where-Object { $_.Category -eq 'cheat-behavior' -and $_.Severity -eq 'medium' })
+    if ($behFindings.Count -ge 3) {
+        $findings.Add((New-Finding 'high' 'cheat-behavior' 'Several different cheat behaviours in one mod' ((@($behFindings | Select-Object -First 4 | ForEach-Object { $_.Rule })) -join ' | ') $File.Name))
+    }
+    $clientStr = @($findings | Where-Object { $_.Rule -eq 'Clients string' })
+    if ($clientStr.Count -eq 1 -and $codeHacks.Count -eq 0 -and @($findings | Where-Object { $_.Severity -eq 'high' -and $_.Rule -ne 'Clients string' }).Count -eq 0) {
+        $clientStr[0].Severity = 'medium'
+        $clientStr[0].Detail = ([string]$clientStr[0].Detail + ' (single mention, may be a compatibility check)')
     }
 
     $high = @($findings | Where-Object Severity -eq 'high').Count
     $med  = @($findings | Where-Object Severity -eq 'medium').Count
     $low  = @($findings | Where-Object Severity -eq 'low').Count
+    $evMed = @($findings | Where-Object { $_.Severity -eq 'medium' -and $_.Category -in 'cheat-name', 'cheat-string', 'cheat-behavior' }).Count
+    $structMed = @($findings | Where-Object { $_.Severity -eq 'medium' -and $_.Category -in 'obfuscation', 'bypass', 'native', 'behavior' }).Count
     $score = [math]::Min(100, ($high * 25) + ($med * 8) + ($low * 2))
     $hasMalware = (@($findings | Where-Object { $_.Severity -eq 'high' -and $_.Category -eq 'malware' }).Count -gt 0)
 
@@ -1557,11 +2441,14 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
     elseif ($policy -and $policy.Kind -eq 'banned') { $verdict = 'CHEAT (Banned Mod)' }
     elseif ($high -ge 1) { $verdict = 'CHEAT' }
     elseif ($policy) { $verdict = 'SUSPICIOUS (Suspect Mod)' }
-    elseif ($med -ge 2 -or ($med -ge 1 -and $strongHacks.Count -ge 1)) { $verdict = 'SUSPICIOUS' }
+    elseif ($evMed -ge 2 -or ($evMed -ge 1 -and ($codeHacks.Count -ge 1 -or $structMed -ge 1)) -or $structMed -ge 3) { $verdict = 'SUSPICIOUS' }
     elseif ($verified) { $verdict = 'VERIFIED' }
     if ($verified -and $verdict -in 'CHEAT', 'MALWARE', 'SUSPICIOUS' -and -not $policy) { $verdict = "$verdict (verified hash: probable false positive)" }
 
     if ($inactive -and ($verdict -like 'CHEAT*')) { $verdict = 'SUSPICIOUS (inactive copy)' }
+
+    $profile = $null
+    if ($prof -and -not $verified -and (Get-ModClass ([pscustomobject]@{ Verdict = $verdict })) -in 'CLEAN', 'SUSPICIOUS') { $profile = New-ModProfile $prof $meta $resNames $state }
 
     [pscustomobject]@{
         File         = $File.Name
@@ -1584,6 +2471,7 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
         Score        = $score
         Verdict      = $verdict
         Hacks        = @($state.Hacks.Values | Sort-Object Kind, Name)
+        Profile      = $profile
         Findings     = @($findings | ForEach-Object { [pscustomobject]@{ Severity = $_.Severity; Category = $_.Category; Rule = $_.Rule; Detail = (Limit-Text (Hide-User $_.Detail) 300); Where = (Limit-Text (Hide-User $_.Where) 200) } })
     }
 }
@@ -3415,6 +4303,7 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
         if ($aiClean -gt 0) { Write-Line ('  {0} other mod(s) judged clean by the AI.' -f $aiClean) DarkGray }
     }
 
+    if ($script:Native -and -not $script:ProfilerOk) { Write-Host ('  NOTE: the deep code profiler could not be compiled here; the AI inspection had less evidence. ({0})' -f (Limit-Text $script:ProfilerError 120)) -ForegroundColor Yellow }
     if (-not $script:Native) { Write-Host ('  NOTE: the class-file analyser could not be compiled here; jar checks ran in text-only mode. ({0})' -f (Limit-Text $script:NativeError 120)) -ForegroundColor Yellow }
 }
 
@@ -3427,11 +4316,12 @@ function ConvertTo-FindingObj($f) {
 
 function New-ReportObject($Summary, $Mods, $Jvm, $Meta, [int]$Level = 0) {
     $modOut = New-Object System.Collections.Generic.List[object]
+    $profSent = 0
     foreach ($m in $Mods) {
         $cls = Get-ModClass $m
         if ($Level -ge 1 -and $cls -in 'CLEAN', 'VERIFIED') { continue }
         $fcap = 200; if ($Level -ge 2) { $fcap = 12 }
-        [void]$modOut.Add([ordered]@{
+        $item = [ordered]@{
             file = $m.File; folder = $m.Folder; sizeKb = $m.SizeKB; sha1 = $m.Sha1; sha256 = $m.Sha256
             modId = $m.ModId; modName = $m.ModName; modVersion = $m.ModVersion; loader = $m.Loader; modrinth = $m.Modrinth
             source = $m.Source; sourceTrust = $m.SourceTrust; modifiedUtc = $m.ModifiedUtc
@@ -3439,7 +4329,9 @@ function New-ReportObject($Summary, $Mods, $Jvm, $Meta, [int]$Level = 0) {
             score = $m.Score; verdict = $m.Verdict; 'class' = $cls
             hacks = @(@($m.Hacks) | Where-Object { $_ } | ForEach-Object { ConvertTo-HackObj $_ })
             findings = @(@($m.Findings) | Sort-Object { -(Get-SevRank $_.Severity) } | Select-Object -First $fcap | ForEach-Object { ConvertTo-FindingObj $_ })
-        })
+        }
+        if ($Level -eq 0 -and $m.Profile -and $profSent -lt 40) { $item['profile'] = $m.Profile; $profSent++ }
+        [void]$modOut.Add($item)
     }
     $sys = $script:Sys.ToArray()
     if ($Level -ge 1) { $sys = @($sys | Where-Object { $_.Severity -ne 'low' }) }

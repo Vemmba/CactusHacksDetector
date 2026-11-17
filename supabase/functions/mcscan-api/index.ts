@@ -1,5 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { createHandler, MOD_BUCKET, processAiQueue } from './core.ts';
+import { createHandler, decideAiCategory, MOD_BUCKET, processAiQueue } from './core.ts';
 import type { ModFile, ScanModMatch, Store, StorageOps } from './core.ts';
 
 const url = Deno.env.get('SUPABASE_URL')!;
@@ -204,7 +204,7 @@ const store: Store = {
 
 async function refreshScanAi(scanId: string): Promise<void> {
   const nowIso = new Date().toISOString();
-  const jobs = ((await db.from('ai_jobs').select('status, result').eq('scan_id', scanId)).data ?? []) as any[];
+  const jobs = ((await db.from('ai_jobs').select('status, result, evidence, mod_file').eq('scan_id', scanId)).data ?? []) as any[];
   if (!jobs.length) return;
   const active = jobs.filter((j) => j.status === 'queued' || j.status === 'processing');
   const allDone = active.length === 0;
@@ -214,40 +214,18 @@ async function refreshScanAi(scanId: string): Promise<void> {
   await db.from('scans').update({ ai_status: aiStatus, ai_results: results, ai_analyzed_at: nowIso }).eq('id', scanId);
   if (!results.length) return;
 
-  const hasAiCheat = results.some((res: any) => res.verdict === 'CHEAT');
-
-  const hasAiSuspect = results.some((res: any) => res.verdict === 'SUSPECT' && Number(res.cheating_score ?? res.score ?? 50) >= 40);
-  const isMinorIndicator = results.some((res: any) =>
-    res.hack_name && /shield.*indicat|reach.*circle|reach.*indicat|fullbright|freecam|cps|hud/i.test(res.hack_name));
+  const evidenceByFile: Record<string, Record<string, any>> = {};
+  for (const j of jobs) if (j.mod_file && j.evidence) evidenceByFile[String(j.mod_file)] = j.evidence;
 
   const scanRes = await db.from('scans').select('verdict, threat_score, reasons, category').eq('id', scanId).single();
   if (!scanRes.data) return;
-  const curVerdict = scanRes.data.verdict;
-  const reasons = Array.isArray(scanRes.data.reasons) ? scanRes.data.reasons : [];
-  let newVerdict = curVerdict;
-  let newCategory: string | null = scanRes.data.category ?? null;
-  let newScore = Number(scanRes.data.threat_score || 0);
-
-  if (curVerdict === 'HIGH RISK' || curVerdict === 'MALWARE FOUND') {
-    newCategory = 'cheater';
-  } else if (hasAiCheat && !isMinorIndicator) {
-    newVerdict = 'REVIEW';
-    newCategory = 'suspect';
-    newScore = Math.min(45, newScore + 25);
-    if (!reasons.some((r: string) => r.includes('AI Mod Inspection'))) {
-      reasons.unshift('AI Mod Inspection: flagged suspicious cheat module (Under Review)');
-    }
-  } else if (hasAiSuspect || isMinorIndicator || curVerdict === 'REVIEW') {
-    newVerdict = 'REVIEW';
-    newCategory = 'suspect';
-    newScore = Math.max(newScore, 20);
-    if (isMinorIndicator && !reasons.some((r: string) => r.includes('Minor assist / indicator'))) {
-      reasons.unshift('Minor assist / indicator detected: Shield status indicator / Reach circle');
-    }
-  } else if (allDone) {
-    newCategory = 'legit';
-  }
-  await db.from('scans').update({ verdict: newVerdict, category: newCategory, threat_score: newScore, reasons }).eq('id', scanId);
+  const decided = decideAiCategory({
+    verdict: scanRes.data.verdict,
+    category: scanRes.data.category ?? null,
+    threat_score: Number(scanRes.data.threat_score || 0),
+    reasons: Array.isArray(scanRes.data.reasons) ? scanRes.data.reasons : [],
+  }, results, evidenceByFile, allDone);
+  await db.from('scans').update({ verdict: decided.verdict, category: decided.category, threat_score: decided.threat_score, reasons: decided.reasons }).eq('id', scanId);
 }
 
       const storage: StorageOps = {
