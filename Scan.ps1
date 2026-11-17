@@ -470,6 +470,8 @@ namespace CactusHacksDetector
         private readonly HashSet<string> vocab = new HashSet<string>();
         private readonly HashSet<string> mixinMethods = new HashSet<string>();
         private readonly List<string> mapped = new List<string>();
+        private readonly Dictionary<string, int> capScore = new Dictionary<string, int>();
+        private readonly Dictionary<string, string> capText = new Dictionary<string, string>();
         private readonly Dictionary<string, string[]> behaviors = new Dictionary<string, string[]>();
         private int total; private int shortNames; private int junkNames; private int enc; private int mappedCount; private int failed;
 
@@ -486,6 +488,7 @@ namespace CactusHacksDetector
             "autoarmor", "autopot", "lagreach", "popswitch", "legitcrystal", "legitanchor", "legittotem"
         };
         private static readonly string[] VocabTok = new string[] { "esp", "aura", "xray", "bhop", "tracers", "nuker", "jesus" };
+        private static readonly string[] StrongFlags = new string[] { "attackEntity", "interactEntity", "atan2", "setRotation", "movePacket", "interactPacket", "clickSlot", "clickPacket", "robot", "nativeHook", "glfwInput", "depthOff", "reachDistance", "swapSlot", "setVelocity", "setOnGround", "reflectInvoke", "setAccessible", "raycast", "entityQuery", "setSprinting", "swingPacket", "actionPacket", "commandPacket" };
         private static readonly string[] PvpHints = new string[] { "totem", "pearl", "anchor", "crystal", "glowstone", "mace" };
 
         private static string Squash(string s)
@@ -975,6 +978,20 @@ namespace CactusHacksDetector
             for (int i = 0; i < ps.Injects.Count && i < 200; i++) { string im = ps.Injects[i]; if (!im.StartsWith("at:", StringComparison.Ordinal) && mixinMethods.Count < 4000) mixinMethods.Add(im); }
             HashSet<string> fl2 = ps.Flags;
             foreach (string k in fl2) Bump(api, k, 1);
+            int capW = 0;
+            List<string> capKeep = new List<string>();
+            foreach (string k in fl2)
+            {
+                if (k == "mcMethodRef") continue;
+                capKeep.Add(k);
+                capW += Array.IndexOf(StrongFlags, k) >= 0 ? 2 : 1;
+            }
+            if (capKeep.Count >= 3 && capW >= 5 && capScore.Count < 3000)
+            {
+                capKeep.Sort(string.CompareOrdinal);
+                capScore[name] = capW;
+                capText[name] = string.Join(",", capKeep.ToArray());
+            }
             Evaluate(fl2, name, hintPvp, hintClick, ps.IsMixin);
             return true;
         }
@@ -1047,6 +1064,7 @@ namespace CactusHacksDetector
             foreach (string v in o.vocab) vocab.Add(v);
             foreach (string m in o.mixinMethods) { if (mixinMethods.Count < 4000) mixinMethods.Add(m); }
             foreach (string s in o.mapped) { if (mapped.Count < 8 && !mapped.Contains(s)) mapped.Add(s); }
+            foreach (KeyValuePair<string, int> kv in o.capScore) { if (!capScore.ContainsKey(kv.Key) && capScore.Count < 3000) { capScore[kv.Key] = kv.Value; capText[kv.Key] = o.capText[kv.Key]; } }
         }
 
         public int Total { get { return total; } }
@@ -1172,6 +1190,15 @@ namespace CactusHacksDetector
             StrArr(sb, "fields", fd, 50); sb.Append(',');
             List<string> st = new List<string>(); Top(strs, cStrings, 1, st);
             StrArr(sb, "strings", st, 60); sb.Append(',');
+            List<string> cp = new List<string>();
+            List<KeyValuePair<string, int>> capList = new List<KeyValuePair<string, int>>(capScore);
+            capList.Sort(delegate(KeyValuePair<string, int> x, KeyValuePair<string, int> y)
+            {
+                int c = y.Value.CompareTo(x.Value);
+                return c != 0 ? c : string.CompareOrdinal(x.Key, y.Key);
+            });
+            for (int i = 0; i < capList.Count && cp.Count < Math.Max(5, cTargets / 2); i++) cp.Add(capList[i].Key + ": " + capText[capList[i].Key]);
+            StrArr(sb, "capabilities", cp, 170); sb.Append(',');
             sb.Append("\"mappedReflection\":{\"count\":").Append(mappedCount).Append(',');
             StrArr(sb, "sample", mapped, 40); sb.Append("},");
             sb.Append("\"api\":{");
@@ -2302,7 +2329,7 @@ function Get-ModMeta($Zip) {
 
 function New-ModProfile($Prof, $Meta, $ResNames, $State) {
     try {
-        $p = ConvertFrom-Json (Hide-User ($Prof.Build(7000)))
+        $p = ConvertFrom-Json (Hide-User ($Prof.Build(8200)))
         $m = [ordered]@{ id = $null; name = $null; version = $null; loader = $null; authors = @(); description = $null; homepage = $null; entrypoints = @(); mixinConfigs = @(); depends = @() }
         if ($Meta) {
             $m.id = $Meta.Id; $m.name = $Meta.Name; $m.version = $Meta.Version; $m.loader = $Meta.Loader
