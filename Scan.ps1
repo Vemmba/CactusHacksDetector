@@ -13,6 +13,7 @@ param(
     [switch]$ModsOnly,
     [switch]$ScanVerified,
     [switch]$SkipVerified,
+    [int]$VerifiedSeconds = 120,
     [switch]$JsonOnlyIfFlagged,
     [switch]$IncludeAccountProfiles,
     [switch]$Yes,
@@ -1426,10 +1427,14 @@ $script:ModuleSkipped = $false
 
 function Write-Line([string]$Text, [string]$Color = 'Gray') { Write-Host $Text -ForegroundColor $Color }
 
+$script:RunSw = [Diagnostics.Stopwatch]::StartNew()
+function Format-Span([TimeSpan]$t) { '{0:00}:{1:00}' -f [int][math]::Floor($t.TotalMinutes), $t.Seconds }
+
 function Write-Section([string]$Title) {
     Write-Host ''
     Write-Host ('=' * 76) -ForegroundColor DarkCyan
-    Write-Host "  $Title" -ForegroundColor Cyan
+    Write-Host "  $Title" -ForegroundColor Cyan -NoNewline
+    Write-Host ('   [running ' + (Format-Span $script:RunSw.Elapsed) + ']') -ForegroundColor DarkGray
     Write-Host ('=' * 76) -ForegroundColor DarkCyan
 }
 
@@ -1508,7 +1513,7 @@ function Invoke-Module([string]$Name, [scriptblock]$Block, [switch]$NeedsAdmin) 
     [void]$script:ModStatus.Add([pscustomobject]@{ Name = $Name; Status = $status; Note = $script:ModuleNote; Findings = $n })
     $color = switch ($status) { 'ok' { 'Green' } 'skipped' { 'DarkYellow' } default { 'Yellow' } }
     $tail = ''; if ($script:ModuleNote) { $tail = "  ($($script:ModuleNote))" }
-    Write-Host ('  [{0,-7}] {1}  - {2} finding(s){3}' -f $status, $Name, $n, $tail) -ForegroundColor $color
+    Write-Host ('  [{0,-7}] {1}  - {2} finding(s){3}   [{4}]' -f $status, $Name, $n, $tail, (Format-Span $script:RunSw.Elapsed)) -ForegroundColor $color
 }
 
 function New-Finding($Sev, $Cat, $Rule, $Detail, $Where) {
@@ -2570,6 +2575,44 @@ function New-ModProfile($Prof, $Meta, $ResNames, $State) {
     } catch { return $null }
 }
 
+$script:CacheFile = $null
+if ($env:LOCALAPPDATA) { $script:CacheFile = Join-Path (Join-Path $env:LOCALAPPDATA 'CactusScan') 'verified-cache.json' }
+$script:VerifiedCache = @{}
+$script:VerifiedOver = $false
+$script:VerifiedSpent = 0.0
+$script:LastSkipWhy = ''
+$script:CacheVer = ''
+
+function Get-CacheVersion {
+    try {
+        $src = [string]$script:ProfilerSource + [string]$Rx.Clients + [string]$Rx.Modules + 'cache-v1'
+        $sha = [Security.Cryptography.SHA1]::Create()
+        $hb = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($src))
+        return ([BitConverter]::ToString($hb) -replace '-', '').ToLower()
+    } catch { return 'none' }
+}
+
+function Read-VerifiedCache {
+    $script:VerifiedCache = @{}
+    $script:CacheVer = Get-CacheVersion
+    try {
+        if ($script:CacheFile -and (Test-Path -LiteralPath $script:CacheFile)) {
+            $o = Get-Content -LiteralPath $script:CacheFile -Raw | ConvertFrom-Json
+            if ($o -and [string]$o.ver -eq $script:CacheVer) { foreach ($h in @($o.sha1)) { if ($h) { $script:VerifiedCache[[string]$h] = $true } } }
+        }
+    } catch {}
+}
+
+function Write-VerifiedCache {
+    try {
+        if (-not $script:CacheFile) { return }
+        $dir = Split-Path -Parent $script:CacheFile
+        if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        $o = [ordered]@{ ver = $script:CacheVer; sha1 = @($script:VerifiedCache.Keys | Select-Object -First 6000) }
+        ($o | ConvertTo-Json -Compress) | Set-Content -LiteralPath $script:CacheFile -Encoding ASCII
+    } catch {}
+}
+
 function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
     $sha1 = $Hashes.Sha1
     $state = [pscustomobject]@{ NestedJars = 0; BytesScanned = 0; ClassesParsed = 0; Hacks = @{}; Keys = (New-Object System.Collections.Generic.List[object]); Nested = (New-Object System.Collections.Generic.List[object]) }
@@ -2582,7 +2625,10 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
         $fs = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite, Delete')
         $zip = New-Object IO.Compression.ZipArchive($fs, [IO.Compression.ZipArchiveMode]::Read)
         $meta = Get-ModMeta $zip
-        if ($verified -and $SkipVerified) { $skipped = $true }
+        $script:LastSkipWhy = ''
+        if ($verified -and $SkipVerified) { $skipped = $true; $script:LastSkipWhy = 'option' }
+        elseif ($verified -and $script:VerifiedCache -and $script:VerifiedCache.ContainsKey($sha1)) { $skipped = $true; $script:LastSkipWhy = 'cache' }
+        elseif ($verified -and $script:VerifiedOver) { $skipped = $true; $script:LastSkipWhy = 'budget' }
         else {
             $r = Scan-Archive $zip $File.Name 0 $state
             foreach ($f in $r.Findings) { $findings.Add($f) }
@@ -2856,7 +2902,29 @@ function Get-RunningInstances {
         $ver = Get-CmdArg $cmd 'version'
         $gd = Get-CmdArg $cmd 'gameDir'
         if (-not $gd -and $cmd -match '--gameDir\s+"?([^"\s][^"]*?)"?(\s+--|\s*$)') { $gd = $Matches[1] }
+        if (-not $gd) {
+            $td = [regex]::Match($cmd, '(?i)-Dminecraft\.applet\.TargetDirectory=("[^"]+"|\S+)')
+            if ($td.Success) { $gd = $td.Groups[1].Value.Trim('"') }
+        }
+        if (-not $gd) {
+            $lpm = [regex]::Match($cmd, '(?i)-Djava\.library\.path=("[^"]+"|\S+)')
+            if ($lpm.Success) {
+                $lpv = $lpm.Groups[1].Value.Trim('"')
+                $ib = [regex]::Match($lpv, '(?i)^(.*\\(?:instances|profiles)\\[^\\]+)\\natives')
+                if ($ib.Success) {
+                    foreach ($sub in 'minecraft', '.minecraft') { $cand = Join-Path $ib.Groups[1].Value $sub; if (Test-Path -LiteralPath $cand) { $gd = $cand; break } }
+                }
+            }
+        }
         if (-not $gd -and $env:APPDATA -and $cmd -match '(?i)\\\.minecraft\\') { $gd = Join-Path $env:APPDATA '.minecraft' }
+        if (-not $user -and $gd) {
+            $lgp = Join-Path $gd 'logs\latest.log'
+            if (Test-Path -LiteralPath $lgp) {
+                $ltx = [string](Read-TextFileSafe $lgp)
+                $um = [regex]::Match($ltx, 'Setting user:\s*(\S+)')
+                if ($um.Success) { $user = $um.Groups[1].Value }
+            }
+        }
         $loader = ''
         if ($cmd -match '(?i)neoforge') { $loader = 'NeoForge' }
         elseif ($cmd -match '(?i)quilt') { $loader = 'Quilt' }
@@ -5347,6 +5415,7 @@ function Invoke-Main {
         Write-Host '  Scan stopped: the username could not be verified. Run the scan again with the username you really play on.' -ForegroundColor Red
         return
     }
+    $script:RunSw.Restart()
     $script:SelectedAccount = $sel.Account
     $script:TargetInstance = $sel.Instance
     Show-ScanTarget $script:Instances $sel
@@ -5399,13 +5468,42 @@ function Invoke-Main {
         if ($modrinth.Count -gt 0) { Write-Line ('  {0} jar(s) verified as official Modrinth downloads' -f $modrinth.Count) DarkGray }
     } elseif ($NoOnline) { Write-Line '  online hash check skipped (-NoOnline)' DarkGray }
 
+    Read-VerifiedCache
+    $script:VerifiedOver = $false; $script:VerifiedSpent = 0.0
+    $jars = @($jars | Sort-Object @{ Expression = { if ($hashes[$_.FullName] -and $hashes[$_.FullName].Sha1 -and $modrinth.ContainsKey($hashes[$_.FullName].Sha1)) { 1 } else { 0 } } }, Length)
+    $unvLeft = 0.0; $verLeft = 0.0
+    foreach ($j in $jars) {
+        if ($hashes[$j.FullName] -and $hashes[$j.FullName].Sha1 -and $modrinth.ContainsKey($hashes[$j.FullName].Sha1)) { $verLeft += [double]$j.Length } else { $unvLeft += [double]$j.Length }
+    }
+    $scanSw = [Diagnostics.Stopwatch]::StartNew()
+    $doneBytes = 0.0; $budgetSkipped = 0; $cacheSkipped = 0
     $mods = New-Object System.Collections.Generic.List[object]
     $i = 0
     foreach ($j in $jars) {
         $i++
-        Write-Host ("`r  scanning {0}/{1}  {2}" -f $i, $jars.Count, (Limit-Text $j.Name 50).PadRight(50)) -NoNewline -ForegroundColor DarkGray
+        $el = $scanSw.Elapsed
+        $eta = ''
+        if ($doneBytes -gt 0 -and $el.TotalSeconds -gt 2) {
+            $remain = $unvLeft; if (-not $script:VerifiedOver) { $remain += $verLeft }
+            $eta = 'ETA ~' + (Format-Span ([TimeSpan]::FromSeconds($el.TotalSeconds * ($remain / $doneBytes))))
+        }
+        Write-Host ("`r  scanning {0}/{1}  elapsed {2}  {3}  {4}" -f $i, $jars.Count, (Format-Span $el), $eta.PadRight(11), (Limit-Text $j.Name 32).PadRight(32)) -NoNewline -ForegroundColor DarkGray
+        $isVer = [bool]($hashes[$j.FullName] -and $hashes[$j.FullName].Sha1 -and $modrinth.ContainsKey($hashes[$j.FullName].Sha1))
+        $t0 = $scanSw.Elapsed.TotalSeconds
         try {
             $r = Invoke-JarScan $j $hashes[$j.FullName] $modrinth
+            $dt = $scanSw.Elapsed.TotalSeconds - $t0
+            if ($isVer) { $verLeft -= [double]$j.Length } else { $unvLeft -= [double]$j.Length }
+            if ($r -and $r.DeepScanned) {
+                $doneBytes += [double]$j.Length
+                if ($isVer) {
+                    $script:VerifiedSpent += $dt
+                    if ($r.Verdict -like 'VERIFIED*' -and @($r.Findings | Where-Object { $_.Severity -in 'high', 'medium' }).Count -eq 0 -and @($r.Hacks).Count -eq 0 -and $r.Sha1) { $script:VerifiedCache[[string]$r.Sha1] = $true }
+                    if ($VerifiedSeconds -gt 0 -and $script:VerifiedSpent -gt $VerifiedSeconds -and -not $script:VerifiedOver) { $script:VerifiedOver = $true }
+                }
+            } elseif ($r -and $isVer) {
+                if ($script:LastSkipWhy -eq 'budget') { $budgetSkipped++ } elseif ($script:LastSkipWhy -eq 'cache') { $cacheSkipped++ }
+            }
             if ($r -and $strayMap.ContainsKey($j.FullName)) {
                 $r.Findings = @($r.Findings) + [pscustomobject]@{ Severity = 'low'; Category = 'location'; Rule = 'Mod jar found outside the mods folders (loaded another way, or left behind)'; Detail = (Hide-User $j.DirectoryName); Where = $j.Name }
             }
@@ -5415,6 +5513,9 @@ function Invoke-Main {
         }
     }
     if ($jars.Count -gt 0) { Write-Host ''; }
+    Write-VerifiedCache
+    if ($cacheSkipped -gt 0) { Write-Line ('  {0} verified mod(s) were checked clean in an earlier scan and skipped (same file, same detection rules)' -f $cacheSkipped) DarkGray }
+    if ($budgetSkipped -gt 0) { Write-Line ('  {0} verified mod(s) were not deep-scanned (time limit {1}s). Run the scan again to continue, or use -VerifiedSeconds 0 for all at once.' -f $budgetSkipped, $VerifiedSeconds) Yellow }
 
     $script:AiJob = $null
 
@@ -5583,7 +5684,7 @@ function Invoke-Main {
     Write-LastRun $summary $script:SelectedAccount.Name
     Show-Report $summary $modsArr $jvm $aiResults
     Write-Host ''
-    Write-Host ('  Done in {0}s.' -f [math]::Round($sw.Elapsed.TotalSeconds)) -ForegroundColor DarkGray
+    Write-Host ('  Done in {0} (mm:ss).' -f (Format-Span $sw.Elapsed)) -ForegroundColor DarkGray
     Write-Host '  This is evidence for a human to review, not proof. Check flagged items before acting on them.' -ForegroundColor DarkGray
     Show-Verdict $summary $modsArr $aiResults
 }
