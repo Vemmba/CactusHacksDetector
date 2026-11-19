@@ -2815,7 +2815,9 @@ function Get-McJavaProcesses {
     } catch { @() }
 }
 
-function Find-ModFolders {
+$script:StaticModFolders = $null
+function Get-StaticModFolders {
+    if ($null -ne $script:StaticModFolders) { return $script:StaticModFolders }
     $roots = New-Object System.Collections.Generic.List[string]
     $bases = New-Object System.Collections.Generic.List[string]
     foreach ($b in $env:APPDATA, $env:LOCALAPPDATA, $env:USERPROFILE) { if ($b) { $bases.Add($b) } }
@@ -2833,6 +2835,36 @@ function Find-ModFolders {
         }
     }
 
+    $script:StaticModFolders = @($roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | ForEach-Object { (Resolve-Path -LiteralPath $_).Path } | Select-Object -Unique)
+    return $script:StaticModFolders
+}
+
+function Find-LiveGameDir($StartUtc) {
+    $locked = New-Object System.Collections.Generic.List[object]
+    foreach ($md in @(Get-StaticModFolders)) {
+        $gd = Split-Path -Parent $md
+        $lp = Join-Path $gd 'logs\latest.log'
+        if (-not (Test-Path -LiteralPath $lp)) { continue }
+        $isLocked = $false
+        try { $fs = [IO.File]::Open($lp, 'Open', 'Read', 'None'); $fs.Dispose() } catch { $isLocked = $true }
+        if (-not $isLocked) { continue }
+        $fi = Get-Item -LiteralPath $lp -ErrorAction SilentlyContinue
+        if ($fi) { $locked.Add([pscustomobject]@{ Dir = $gd; Created = $fi.CreationTimeUtc; Written = $fi.LastWriteTimeUtc }) }
+    }
+    if ($locked.Count -eq 0) { return $null }
+    if ($locked.Count -eq 1 -or -not $StartUtc) { return $locked[0].Dir }
+    $best = $null; $bestGap = [double]::MaxValue
+    foreach ($c in $locked) {
+        if ($c.Written -lt $StartUtc.AddMinutes(-1)) { continue }
+        $gap = [math]::Abs(($c.Created - $StartUtc).TotalSeconds)
+        if ($gap -lt $bestGap) { $bestGap = $gap; $best = $c.Dir }
+    }
+    return $best
+}
+
+function Find-ModFolders {
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($sm in @(Get-StaticModFolders)) { $roots.Add($sm) }
     foreach ($ri in @(Get-RunningInstances)) { if ($ri.ModsDir) { $roots.Add($ri.ModsDir) } }
     foreach ($m in $ModPath) { if ($m) { $roots.Add($m) } }
 
@@ -2915,6 +2947,11 @@ function Get-RunningInstances {
                     foreach ($sub in 'minecraft', '.minecraft') { $cand = Join-Path $ib.Groups[1].Value $sub; if (Test-Path -LiteralPath $cand) { $gd = $cand; break } }
                 }
             }
+        }
+        if (-not $gd) {
+            $stl = $null
+            try { $stl = $p.CreationDate.ToUniversalTime() } catch {}
+            $gd = Find-LiveGameDir $stl
         }
         if (-not $gd -and $env:APPDATA -and $cmd -match '(?i)\\\.minecraft\\') { $gd = Join-Path $env:APPDATA '.minecraft' }
         if (-not $user -and $gd) {
@@ -4970,7 +5007,8 @@ function Get-TimelineEvents($Groups) {
     $ev = New-Object System.Collections.Generic.List[object]
     $add = {
         param($Time, $Kind, $What, $Where, $Source)
-        [void]$ev.Add([pscustomobject]@{ Time = $Time; Kind = $Kind; What = $What; Where = $Where; Source = $Source })
+        $tm = ConvertTo-RunTime $Time
+        [void]$ev.Add([pscustomobject]@{ Time = $tm; Kind = $Kind; What = $What; Where = $Where; Source = $Source })
     }
     foreach ($g in @($Groups)) {
         foreach ($fm in $g.FlaggedMods) {
@@ -4990,7 +5028,7 @@ function Get-TimelineEvents($Groups) {
         if ($s.Category -eq 'browser-download') { $kind = 'downloaded' }
         & $add (ConvertTo-RunTime $s.Time) $kind ([string]$s.Rule + ': ' + [string]$s.Detail) '' ([string]$s.Source)
     }
-    $dated = @($ev | Where-Object { $_.Time } | Sort-Object Time -Descending)
+    $dated = @($ev | Where-Object { $_.Time } | Sort-Object { ([datetime]$_.Time).Ticks } -Descending)
     $undated = @($ev | Where-Object { -not $_.Time })
     return @($dated + $undated | Select-Object -First 40)
 }
@@ -5109,9 +5147,11 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
     }
     if (-not $ModsOnly) { Write-Host '   (system forensics are not shown here - the full details are in the JSON report)' -ForegroundColor DarkGray }
 
-    $instGroups = @(Get-InstanceGroups $Mods)
-    Show-InstanceSummary $instGroups
-    Show-Timeline $instGroups
+    try {
+        $instGroups = @(Get-InstanceGroups $Mods)
+        Show-InstanceSummary $instGroups
+        Show-Timeline $instGroups
+    } catch { Write-Host '   (the instance and timeline sections could not be shown on this PC)' -ForegroundColor DarkGray }
 
     Write-Section ('MODS  ({0} jar/file(s) checked)' -f @($Mods).Count)
     $flagged = @($Mods | Where-Object { (Get-ModClass $_) -in 'MALWARE', 'CHEAT', 'SUSPICIOUS' } | Sort-Object { -[int]$_.Score })
@@ -5588,9 +5628,12 @@ function Invoke-Main {
     $pcId = $null; if ($guid) { $pcId = (Get-Sha256Hex ('CactusHacksDetector:' + $guid)).Substring(0, 16) }
     $osName = $null; $osBuild = $null; if ($os) { $osName = [string]$os.Caption; $osBuild = [string]$os.BuildNumber }
     $accounts = if ($script:Accounts) { $script:Accounts } else { Get-MinecraftAccountProfiles }
-    $instGroupsMeta = @(Get-InstanceGroups $modsArr)
-    $instMeta = @(ConvertTo-InstanceMeta $instGroupsMeta)
-    $tlMeta = @(ConvertTo-TimelineMeta (Get-TimelineEvents $instGroupsMeta))
+    $instMeta = @(); $tlMeta = @()
+    try {
+        $instGroupsMeta = @(Get-InstanceGroups $modsArr)
+        $instMeta = @(ConvertTo-InstanceMeta $instGroupsMeta)
+        $tlMeta = @(ConvertTo-TimelineMeta (Get-TimelineEvents $instGroupsMeta))
+    } catch { $instMeta = @(); $tlMeta = @() }
     $tgt = $null
     if ($script:TargetInstance) {
         $ti = $script:TargetInstance
