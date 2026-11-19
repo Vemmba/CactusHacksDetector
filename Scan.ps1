@@ -2552,13 +2552,300 @@ function Find-ModFolders {
         }
     }
 
-    foreach ($p in (Get-McJavaProcesses)) {
-        if ($p.CommandLine -match '--gameDir\s+"?([^"\s][^"]*?)"?(\s+--|\s*$)') { $roots.Add((Join-Path $Matches[1] 'mods')) }
-    }
+    foreach ($ri in @(Get-RunningInstances)) { if ($ri.ModsDir) { $roots.Add($ri.ModsDir) } }
     foreach ($m in $ModPath) { if ($m) { $roots.Add($m) } }
 
     $roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
         ForEach-Object { (Resolve-Path -LiteralPath $_).Path } | Select-Object -Unique
+}
+
+$script:LastRunFile = $null
+if ($env:LOCALAPPDATA) { $script:LastRunFile = Join-Path (Join-Path $env:LOCALAPPDATA 'CactusScan') 'lastrun.json' }
+$script:PrevRun = $null
+$script:Instances = @()
+$script:TargetInstance = $null
+$script:UsernameCheck = $null
+
+function Get-CmdArg([string]$Cmd, [string]$Name) {
+    if (-not $Cmd) { return $null }
+    $m = [regex]::Match($Cmd, '(?i)(?:^|\s)--' + [regex]::Escape($Name) + '(?:\s+|=)(?:"([^"]*)"|(\S+))')
+    if (-not $m.Success) { return $null }
+    if ($m.Groups[1].Success) { return $m.Groups[1].Value }
+    return $m.Groups[2].Value
+}
+
+function Get-LauncherInfo([string]$Path) {
+    $p = [string]$Path
+    if (-not $p) { return [pscustomobject]@{ Launcher = 'Unknown launcher'; Instance = 'unknown' } }
+    $rules = @(
+        @('Prism Launcher', '(?i)\\PrismLauncher\\instances\\([^\\]+)'),
+        @('MultiMC', '(?i)\\MultiMC\\instances\\([^\\]+)'),
+        @('PolyMC', '(?i)\\PolyMC\\instances\\([^\\]+)'),
+        @('Modrinth App', '(?i)\\(?:ModrinthApp|com\.modrinth\.theseus)\\profiles\\([^\\]+)'),
+        @('CurseForge', '(?i)\\curseforge\\minecraft\\Instances\\([^\\]+)'),
+        @('ATLauncher', '(?i)\\ATLauncher\\instances\\([^\\]+)'),
+        @('GDLauncher', '(?i)\\gdlauncher_next\\instances\\([^\\]+)'),
+        @('FTB App', '(?i)\\FTBApp\\instances\\([^\\]+)'),
+        @('Technic', '(?i)\\\.?technic'),
+        @('TLauncher', '(?i)\\\.tlauncher'),
+        @('Feather Client', '(?i)\\\.feather'),
+        @('Lunar Client', '(?i)\\\.lunarclient'),
+        @('Badlion Client', '(?i)\\\.badlion')
+    )
+    $leaf = Split-Path -Leaf $p
+    if ($leaf -match '^\.?minecraft$') { $parent = Split-Path -Parent $p; if ($parent) { $leaf = Split-Path -Leaf $parent } }
+    foreach ($r in $rules) {
+        $m = [regex]::Match($p, $r[1])
+        if ($m.Success) {
+            $inst = $leaf
+            if ($m.Groups.Count -gt 1 -and $m.Groups[1].Success) { $inst = $m.Groups[1].Value }
+            return [pscustomobject]@{ Launcher = $r[0]; Instance = $inst }
+        }
+    }
+    if ($p -match '(?i)\\\.minecraft\\?$') { return [pscustomobject]@{ Launcher = 'Minecraft Launcher'; Instance = 'default (.minecraft)' } }
+    return [pscustomobject]@{ Launcher = 'Custom folder'; Instance = $leaf }
+}
+
+function Get-RunningInstances {
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($p in @(Get-McJavaProcesses)) {
+        $cmd = [string]$p.CommandLine
+        if (-not $cmd) { continue }
+        $user = Get-CmdArg $cmd 'username'
+        $uuid = Get-CmdArg $cmd 'uuid'
+        $ver = Get-CmdArg $cmd 'version'
+        $gd = Get-CmdArg $cmd 'gameDir'
+        if (-not $gd -and $cmd -match '--gameDir\s+"?([^"\s][^"]*?)"?(\s+--|\s*$)') { $gd = $Matches[1] }
+        if (-not $gd -and $env:APPDATA -and $cmd -match '(?i)\\\.minecraft\\') { $gd = Join-Path $env:APPDATA '.minecraft' }
+        $loader = ''
+        if ($cmd -match '(?i)neoforge') { $loader = 'NeoForge' }
+        elseif ($cmd -match '(?i)quilt') { $loader = 'Quilt' }
+        elseif ($cmd -match '(?i)fabric') { $loader = 'Fabric' }
+        elseif ($cmd -match '(?i)forge') { $loader = 'Forge' }
+        $md = $null
+        if ($gd) {
+            $c = Join-Path $gd 'mods'
+            if (Test-Path -LiteralPath $c) { try { $md = (Resolve-Path -LiteralPath $c -ErrorAction Stop).Path } catch { $md = $c } }
+        }
+        $st = $null
+        try { $st = $p.CreationDate.ToUniversalTime() } catch {}
+        $li = Get-LauncherInfo $gd
+        [void]$out.Add([pscustomobject]@{
+            Pid = [int]$p.ProcessId; Process = [string]$p.Name; Username = $user; Uuid = $uuid; Version = $ver; Loader = $loader
+            GameDir = $gd; ModsDir = $md; Launcher = $li.Launcher; Instance = $li.Instance; StartedUtc = $st
+        })
+    }
+    return $out.ToArray()
+}
+
+function Get-FolderLabel([string]$Folder, $Instances) {
+    $f = ([string]$Folder).TrimEnd('\')
+    foreach ($i in @($Instances | Where-Object { $_ })) {
+        foreach ($root in @($i.ModsDir, $i.GameDir)) {
+            if (-not $root) { continue }
+            $r = ([string]$root).TrimEnd('\')
+            if ($f.Equals($r, [StringComparison]::OrdinalIgnoreCase) -or $f.StartsWith($r + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                return [pscustomobject]@{ Running = $true; Text = ('{0} / {1}' -f $i.Launcher, $i.Instance); Instance = $i }
+            }
+        }
+    }
+    $li = Get-LauncherInfo $f
+    return [pscustomobject]@{ Running = $false; Text = ('{0} / {1}' -f $li.Launcher, $li.Instance); Instance = $null }
+}
+
+function Get-HttpStatus($ErrorRecord) {
+    try { return [int]$ErrorRecord.Exception.Response.StatusCode } catch { return 0 }
+}
+
+function Test-MojangUsername([string]$Name) {
+    if ($NoOnline) { return [pscustomobject]@{ Status = 'unknown'; Name = $null; Id = $null } }
+    $enc = [uri]::EscapeDataString($Name)
+    $urls = @(('https://api.mojang.com/users/profiles/minecraft/' + $enc), ('https://api.minecraftservices.com/minecraft/profile/lookup/name/' + $enc))
+    $missing = 0
+    foreach ($u in $urls) {
+        try {
+            $r = Invoke-RestMethod -Method Get -Uri $u -TimeoutSec 8 -ErrorAction Stop
+            if ($r -and $r.name) { return [pscustomobject]@{ Status = 'exists'; Name = [string]$r.name; Id = [string]$r.id } }
+            $missing++
+        } catch {
+            $code = Get-HttpStatus $_
+            if ($code -eq 404 -or $code -eq 204) { $missing++ }
+        }
+    }
+    if ($missing -ge 2) { return [pscustomobject]@{ Status = 'missing'; Name = $null; Id = $null } }
+    return [pscustomobject]@{ Status = 'unknown'; Name = $null; Id = $null }
+}
+
+function Get-MaskedName([string]$Name) {
+    if (-not $Name) { return '' }
+    if ($Name.Length -le 2) { return ($Name.Substring(0, 1) + '*') }
+    return ($Name.Substring(0, 1) + ('*' * ($Name.Length - 2)) + $Name.Substring($Name.Length - 1))
+}
+
+function Resolve-UsernameClaim([string]$Entered, $Accounts, $Instances) {
+    $name = ([string]$Entered).Trim()
+    $r = [pscustomobject]@{ Ok = $false; Message = ''; Account = $null; Instance = $null; Method = ''; Mojang = ''; UuidMatch = $null }
+    if ($name -notmatch '^[A-Za-z0-9_]{1,16}$') {
+        $r.Message = ('"{0}" is not a valid Minecraft username (1-16 letters, numbers or underscores).' -f (Limit-Text $name 24))
+        return $r
+    }
+    $accts = @($Accounts | Where-Object { $_ })
+    $local = Match-MinecraftAccount $accts $name
+    $running = @($Instances | Where-Object { $_ -and $_.Username })
+    if ($running.Count -gt 0) {
+        $hit = @($running | Where-Object { $_.Username.Equals($name, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)
+        if ($hit.Count -eq 0) {
+            $masked = (@($running | ForEach-Object { Get-MaskedName $_.Username } | Select-Object -Unique) -join ', ')
+            $r.Message = ('"{0}" is not the account of the Minecraft that is running right now (it is logged in as {1}). Enter the username you are playing on.' -f $name, $masked)
+            return $r
+        }
+        $inst = $hit[0]
+        $acct = $local
+        if (-not $acct) { $acct = [pscustomobject]@{ Name = $inst.Username; YggUserName = $null; Id = $inst.Uuid; Active = $true; Source = 'running-instance' } }
+        if ($local -and $local.Id -and $inst.Uuid) {
+            $r.UuidMatch = (([string]$local.Id -replace '-', '').ToLower() -eq ([string]$inst.Uuid -replace '-', '').ToLower())
+        }
+        $r.Ok = $true; $r.Account = $acct; $r.Instance = $inst; $r.Method = 'running-instance'; $r.Mojang = 'skipped'
+        return $r
+    }
+    if ($local) {
+        $r.Ok = $true; $r.Account = $local; $r.Method = 'launcher-account'; $r.Mojang = 'skipped'
+        return $r
+    }
+    if ($accts.Count -gt 0) {
+        $r.Message = ('no launcher account named "{0}" exists on this PC ({1} account(s) found). Enter the username you really play on.' -f $name, $accts.Count)
+        return $r
+    }
+    $mj = Test-MojangUsername $name
+    $r.Mojang = $mj.Status
+    if ($mj.Status -eq 'missing') {
+        $r.Message = ('the username "{0}" does not exist on Mojang and no launcher account was found on this PC.' -f $name)
+        return $r
+    }
+    $nm = $name; $id = $null
+    if ($mj.Status -eq 'exists') { $nm = $mj.Name; $id = $mj.Id }
+    $src = 'user-input'; $method = 'unverified'
+    if ($mj.Status -eq 'exists') { $src = 'mojang'; $method = 'mojang' }
+    $r.Ok = $true; $r.Method = $method
+    $r.Account = [pscustomobject]@{ Name = $nm; YggUserName = $null; Id = $id; Active = $true; Source = $src }
+    return $r
+}
+
+function Select-MinecraftAccount([string]$TargetUsername, $Instances) {
+    $accounts = @(Get-AllMinecraftAccounts)
+    $script:UsernameCheck = [ordered]@{ method = ''; attempts = 0; failures = 0; mojang = ''; uuidMatch = $null }
+    $entered = $TargetUsername
+    $tries = 0
+    while ($tries -lt 3) {
+        if ([string]::IsNullOrWhiteSpace($entered)) {
+            try { $entered = Read-Host '  Enter your Minecraft username' } catch { break }
+        }
+        $tries++
+        $script:UsernameCheck.attempts = $tries
+        $res = Resolve-UsernameClaim $entered $accounts $Instances
+        if ($res.Ok) {
+            $script:UsernameCheck.method = $res.Method
+            $script:UsernameCheck.mojang = $res.Mojang
+            $script:UsernameCheck.uuidMatch = $res.UuidMatch
+            $script:UsernameCheck.failures = $tries - 1
+            return $res
+        }
+        $script:UsernameCheck.failures = $tries
+        Write-Host ('  WRONG USERNAME: ' + $res.Message) -ForegroundColor Red
+        if ($tries -lt 3) { Write-Host ('  Try again ({0} attempt(s) left).' -f (3 - $tries)) -ForegroundColor Yellow }
+        $entered = $null
+    }
+    return $null
+}
+
+function ConvertTo-RunTime($Value) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    try { return [datetime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) } catch { return $null }
+}
+
+function Format-Ago([datetime]$Utc) {
+    $s = ((Get-Date).ToUniversalTime() - $Utc).TotalSeconds
+    if ($s -lt 90) { return 'just now' }
+    $n = 0; $u = 'minute'
+    if ($s -lt 3600) { $n = [int][math]::Floor($s / 60) }
+    elseif ($s -lt 86400) { $n = [int][math]::Floor($s / 3600); $u = 'hour' }
+    else { $n = [int][math]::Floor($s / 86400); $u = 'day' }
+    if ($n -ne 1) { $u += 's' }
+    return ('{0} {1} ago' -f $n, $u)
+}
+
+function Read-LastRun {
+    try {
+        if ($script:LastRunFile -and (Test-Path -LiteralPath $script:LastRunFile)) {
+            return (Get-Content -LiteralPath $script:LastRunFile -Raw -ErrorAction Stop | ConvertFrom-Json)
+        }
+    } catch {}
+    return $null
+}
+
+function Write-LastRun($Summary, [string]$Name) {
+    if (-not $script:LastRunFile) { return }
+    try {
+        $dir = Split-Path -Parent $script:LastRunFile
+        if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        $n = 1
+        if ($script:PrevRun -and $script:PrevRun.runs) { $n = [int]$script:PrevRun.runs + 1 }
+        $inst = ''
+        if ($script:TargetInstance) { $inst = ('{0} / {1}' -f $script:TargetInstance.Launcher, $script:TargetInstance.Instance) }
+        $o = [ordered]@{
+            timeUtc = (Get-Date).ToUniversalTime().ToString('o'); username = $Name; verdict = [string]$Summary.verdict
+            category = [string]$Summary.category; score = [int]$Summary.threatScore; runs = $n; instance = $inst
+        }
+        [IO.File]::WriteAllText($script:LastRunFile, ($o | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+    } catch {}
+}
+
+function Show-LastRun($Prev) {
+    $t = $null
+    if ($Prev) { $t = ConvertTo-RunTime $Prev.timeUtc }
+    if (-not $t) { Write-Host '  Last scan : never (first scan on this PC)' -ForegroundColor DarkGray; return }
+    $who = ''
+    if ($Prev.username) { $who = ', as ' + $Prev.username }
+    Write-Host ('  Last scan : {0} ({1}) - verdict {2}, score {3}/100{4}' -f $t.ToLocalTime().ToString('yyyy-MM-dd HH:mm'), (Format-Ago $t), $Prev.verdict, $Prev.score, $who) -ForegroundColor Cyan
+}
+
+function Show-ScanTarget($Instances, $Res) {
+    Write-Section 'SCAN TARGET'
+    $acct = $Res.Account
+    $how = 'could not be checked online, not verified'
+    if ($Res.Method -eq 'running-instance') { $how = 'verified: matches the account of the running Minecraft' }
+    elseif ($Res.Method -eq 'launcher-account') { $how = 'verified: found in the launcher accounts on this PC' }
+    elseif ($Res.Method -eq 'mojang') { $how = 'verified: exists on Mojang (no launcher account on this PC to compare)' }
+    $col = 'Green'
+    if ($Res.Method -eq 'unverified') { $col = 'Yellow' }
+    Write-Host ('  Username   : {0}  ({1})' -f $acct.Name, $how) -ForegroundColor $col
+    if ($Res.UuidMatch -eq $false) { Write-Host '  WARNING    : the running game UUID does not match the launcher account with that name' -ForegroundColor Yellow }
+    $list = @($Instances | Where-Object { $_ })
+    if ($list.Count -eq 0) {
+        Write-Host '  Minecraft  : not running - scanning every mods folder found on this PC' -ForegroundColor DarkGray
+        return
+    }
+    foreach ($i in $list) {
+        $isTarget = ($Res.Instance -and $i.Pid -eq $Res.Instance.Pid)
+        $tag = 'also running, not the verified account'
+        $tcol = 'DarkGray'
+        if ($isTarget) { $tag = 'THIS INSTANCE IS BEING SCANNED'; $tcol = 'Green' }
+        $ver = (('{0} {1}' -f $i.Loader, $i.Version).Trim())
+        Write-Host ''
+        Write-Host ('  Minecraft  : RUNNING  PID {0}  {1}   [{2}]' -f $i.Pid, $ver, $tag) -ForegroundColor $tcol
+        Write-Host ('  Launcher   : {0}' -f $i.Launcher) -ForegroundColor Gray
+        Write-Host ('  Instance   : {0}' -f $i.Instance) -ForegroundColor Gray
+        if ($i.Username) { Write-Host ('  Logged in  : {0}' -f $i.Username) -ForegroundColor Gray }
+        if ($i.GameDir) { Write-Host ('  Location   : {0}' -f (Hide-User $i.GameDir)) -ForegroundColor Gray }
+        if ($i.ModsDir) {
+            $cnt = @(Get-ChildItem -LiteralPath $i.ModsDir -File -Force -ErrorAction SilentlyContinue).Count
+            Write-Host ('  Mods folder: {0}  ({1} file(s))' -f (Hide-User $i.ModsDir), $cnt) -ForegroundColor Gray
+        } else {
+            Write-Host '  Mods folder: not found for this instance' -ForegroundColor DarkYellow
+        }
+        if ($i.StartedUtc) { Write-Host ('  Started    : {0}' -f (Format-When $i.StartedUtc.ToString('o'))) -ForegroundColor Gray }
+    }
 }
 
 function Read-TextFileSafe([string]$Path, [long]$MaxLen = 30MB) {
@@ -2674,50 +2961,6 @@ function Match-MinecraftAccount($AccountsList, [string]$EnteredUsername) {
         }
     }
     return $null
-}
-
-function Select-MinecraftAccount([string]$TargetUsername) {
-    $accounts = @(Get-AllMinecraftAccounts)
-
-    if ($TargetUsername) {
-        $m = Match-MinecraftAccount $accounts $TargetUsername
-        if ($m) { return $m }
-        return [pscustomobject]@{
-            Name = $TargetUsername.Trim()
-            YggUserName = $null
-            Id = $null
-            Active = $true
-            Source = 'parameter'
-        }
-    }
-
-    if ($accounts.Count -eq 0) {
-        Write-Host '  No Minecraft launcher accounts found on this system.' -ForegroundColor DarkGray
-        while ($true) {
-            $entered = (Read-Host '  Enter your Minecraft username').Trim()
-            if ($entered -match '^[A-Za-z0-9_]{1,16}$') {
-                return [pscustomobject]@{
-                    Name = $entered
-                    YggUserName = $null
-                    Id = $null
-                    Active = $true
-                    Source = 'user-input'
-                }
-            }
-            Write-Host '  Please enter a valid Minecraft username (1-16 alphanumeric characters or underscores).' -ForegroundColor Yellow
-        }
-    }
-
-    while ($true) {
-        $entered = (Read-Host '  Enter your Minecraft username').Trim()
-        if (-not $entered) { continue }
-        $matched = Match-MinecraftAccount $accounts $entered
-        if ($matched) {
-            Write-Host ("  Account found: {0}" -f $matched.Name) -ForegroundColor Green
-            return $matched
-        }
-        Write-Host ("  Account '{0}' was not found in Minecraft or PrismLauncher accounts. Please try again." -f $entered) -ForegroundColor Yellow
-    }
 }
 
 function Get-MinecraftAccountReport($SelectedAccount) {
@@ -3067,7 +3310,6 @@ function Invoke-HistoryChecks {
             }
         }
     }
-    Set-ModuleNote 'cmd.exe keeps no history on disk: only logged / running commands are visible'
 }
 
 function Invoke-EventLogChecks {
@@ -4260,6 +4502,18 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
     Write-Host ('   mods: {0} malware, {1} cheat, {2} suspicious, {3} verified, {4} unknown-clean' -f $cn.modsMalware, $cn.modsCheat, $cn.modsSuspicious, $cn.modsVerified, $cn.modsClean) -ForegroundColor Gray
     $shownReasons = if ($Summary.terminalReasons) { @($Summary.terminalReasons) } else { @($Summary.reasons) }
     foreach ($r in $shownReasons) { Write-Host ('     - ' + (Limit-Text $r 120)) -ForegroundColor $vc }
+    $prevText = 'none (first scan on this PC)'
+    $pt = $null
+    if ($script:PrevRun) { $pt = ConvertTo-RunTime $script:PrevRun.timeUtc }
+    if ($pt) { $prevText = ('{0} ({1}) - {2}' -f $pt.ToLocalTime().ToString('yyyy-MM-dd HH:mm'), (Format-Ago $pt), $script:PrevRun.verdict) }
+    Write-Host ('   this scan: {0}   previous scan: {1}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm'), $prevText) -ForegroundColor DarkGray
+    if ($script:TargetInstance) {
+        $ti = $script:TargetInstance
+        Write-Host ('   scanned instance: {0} / {1}  (PID {2}, account {3})' -f $ti.Launcher, $ti.Instance, $ti.Pid, $ti.Username) -ForegroundColor DarkGray
+        if ($ti.GameDir) { Write-Host ('   location: ' + (Limit-Text (Hide-User $ti.GameDir) 120)) -ForegroundColor DarkGray }
+    } else {
+        Write-Host '   Minecraft was not running during this scan.' -ForegroundColor DarkGray
+    }
     if (-not $ModsOnly) { Write-Host '   (system forensics are not shown here - the full details are in the JSON report)' -ForegroundColor DarkGray }
 
     Write-Section ('MODS  ({0} jar/file(s) checked)' -f @($Mods).Count)
@@ -4275,8 +4529,18 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
         Write-Host ('  [{0}] {1}   score {2}' -f $cls, $nm, $m.Score) -ForegroundColor $col
         $srcText = 'unknown'; if ($m.Source) { $srcText = Limit-Text (Hide-User $m.Source) 70 }
         Write-Host ('      sha1 {0}   downloaded from: {1} ({2})' -f $m.Sha1, $srcText, $m.SourceTrust) -ForegroundColor DarkGray
+        if ($m.LocalPath) {
+            $lab = Get-FolderLabel (Split-Path -Parent $m.LocalPath) $script:Instances
+            Write-Host ('      location: ' + (Limit-Text (Hide-User $m.LocalPath) 150)) -ForegroundColor DarkGray
+            $labText = $lab.Text
+            if ($lab.Running) { $labText += '   (RUNNING INSTANCE)' }
+            Write-Host ('      instance: ' + $labText) -ForegroundColor DarkGray
+        }
+        $hn = @(@($m.Hacks) | Where-Object { $_ -and $_.Strength -ne 'weak' -and $_.Kind -ne 'Keybind' } | Select-Object -First 6 | ForEach-Object { $_.Name })
+        if ($hn.Count -gt 0) { Write-Host ('      hacks detected: ' + ($hn -join ', ')) -ForegroundColor Red }
         foreach ($f in (@($m.Findings) | Sort-Object { -(Get-SevRank $_.Severity) } | Select-Object -First 4)) {
             Write-FindingLine $f.Severity $f.Rule (Limit-Text $f.Detail 130) '' '    '
+            if ($f.Where -and ([string]$f.Where) -ne ([string]$f.Detail)) { Write-Host ('               found in: ' + (Limit-Text (Hide-User ([string]$f.Where)) 110)) -ForegroundColor DarkCyan }
         }
         $more = @($m.Findings).Count - 4
         if ($more -gt 0) { Write-Host ('      ... and {0} more finding(s) in the JSON' -f $more) -ForegroundColor DarkGray }
@@ -4284,7 +4548,7 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
     if ($fp.Count -gt 0) { Write-Line ('  {0} file(s) looked odd but their hash matches an official Modrinth download (probable false positive).' -f $fp.Count) DarkGray }
 
     $hackRows = New-Object System.Collections.Generic.List[object]
-    foreach ($m in $Mods) { foreach ($h in @($m.Hacks)) { if ($h) { [void]$hackRows.Add([pscustomobject]@{ Mod = $m.File; H = $h; Cls = (Get-ModClass $m) }) } } }
+    foreach ($m in $Mods) { foreach ($h in @($m.Hacks)) { if ($h) { [void]$hackRows.Add([pscustomobject]@{ Mod = $m.File; H = $h; Cls = (Get-ModClass $m); Path = $m.LocalPath }) } } }
     $shownRows = @($hackRows | Where-Object { $_.Cls -notin 'FP', 'VERIFIED' -and $_.H.Strength -ne 'weak' })
     Write-Section 'HACKS DETECTED  (module -> toggle key)'
     if ($shownRows.Count -eq 0) { Write-Line '  No hack modules identified.' Green }
@@ -4295,6 +4559,7 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
             if ($r.Mod -ne $lastMod) {
                 if ($lastMod -and $rowsShown -gt 5) { Write-Host ('     ... and {0} more module(s) in the JSON' -f ($rowsShown - 5)) -ForegroundColor DarkGray }
                 Write-Host ''; Write-Host ('  ' + $r.Mod) -ForegroundColor Cyan; $lastMod = $r.Mod; $rowsShown = 0
+                if ($r.Path) { Write-Host ('     location: ' + (Limit-Text (Hide-User $r.Path) 130)) -ForegroundColor DarkGray }
             }
             $rowsShown++
             if ($rowsShown -gt 5) { continue }
@@ -4303,6 +4568,7 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
             Write-Host ('     {0,-26} {1,-12}' -f (Limit-Text $r.H.Name 26), $r.H.Kind) -NoNewline -ForegroundColor White
             Write-Host $key -NoNewline -ForegroundColor $kcol
             if ($r.H.KeybindSource) { Write-Host ('   [' + (Limit-Text $r.H.KeybindSource 70) + ']') -ForegroundColor DarkGray } else { Write-Host '' }
+            if ($r.H.Evidence) { Write-Host ('        found in: ' + (Limit-Text (Hide-User $r.H.Evidence) 110)) -ForegroundColor DarkCyan }
         }
         if ($rowsShown -gt 5) { Write-Host ('     ... and {0} more module(s) in the JSON' -f ($rowsShown - 5)) -ForegroundColor DarkGray }
     }
@@ -4310,6 +4576,8 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
     if (@($Jvm).Count -gt 0) { Write-Section 'RUNNING GAME (JVM)' }
     foreach ($j in $Jvm) {
         Write-Host ('  PID {0} ({1}) started {2}' -f $j.Pid, $j.Name, (Format-When $j.StartedUtc)) -ForegroundColor Cyan
+        $ri = @($script:Instances | Where-Object { $_ -and $_.Pid -eq $j.Pid } | Select-Object -First 1)
+        if ($ri.Count -gt 0) { Write-Host ('     account {0}   {1} / {2}   {3}' -f $ri[0].Username, $ri[0].Launcher, $ri[0].Instance, (Hide-User $ri[0].GameDir)) -ForegroundColor DarkGray }
         if ($j.Memory) { Write-Host ('     memory scan: {0}   {1} MB read' -f $(if ($j.Memory.Ok) { 'completed' } else { 'not completed' }), $j.Memory.ScannedMB) -ForegroundColor DarkGray
             if ($j.Memory.Note) { Write-Host ('     note: ' + $j.Memory.Note) -ForegroundColor DarkGray } }
         if (@($j.Findings).Count -eq 0) { Write-Line '     no suspicious launch flags, DLLs or memory strings.' Green }
@@ -4540,7 +4808,19 @@ function Invoke-Main {
     if (-not $script:IsAdmin -and -not $ModsOnly) { Write-Host '  Tip: Run as Administrator for deep forensic checks (Prefetch, BAM, Security log).' -ForegroundColor Yellow }
     Read-BadHashFile $BadHashFile
 
-    $script:SelectedAccount = Select-MinecraftAccount $Username
+    $script:PrevRun = Read-LastRun
+    Write-Host ''
+    Show-LastRun $script:PrevRun
+    $script:Instances = @(Get-RunningInstances)
+    $sel = Select-MinecraftAccount $Username $script:Instances
+    if (-not $sel) {
+        Write-Host ''
+        Write-Host '  Scan stopped: the username could not be verified. Run the scan again with the username you really play on.' -ForegroundColor Red
+        return
+    }
+    $script:SelectedAccount = $sel.Account
+    $script:TargetInstance = $sel.Instance
+    Show-ScanTarget $script:Instances $sel
     $script:Accounts = Get-MinecraftAccountReport $script:SelectedAccount
 
     foreach ($p in @(Get-McJavaProcesses)) {
@@ -4551,7 +4831,11 @@ function Invoke-Main {
     Write-Section 'MOD SCAN'
     $folders = @(Find-ModFolders)
     if ($folders.Count -eq 0) { Write-Line '  No Minecraft mods folders found. Use -ModPath <folder> to point at one.' Yellow }
-    foreach ($f in $folders) { Write-Line ('  folder: ' + (Hide-User $f)) DarkGray }
+    foreach ($f in $folders) {
+        $lab = Get-FolderLabel $f $script:Instances
+        $line = '  folder: ' + (Hide-User $f) + '   [' + $lab.Text + ']'
+        if ($lab.Running) { Write-Line ($line + '   <-- RUNNING INSTANCE') Green } else { Write-Line $line DarkGray }
+    }
 
     $jarExt = '.jar', '.disabled', '.old', '.bak'
     $items = New-Object System.Collections.Generic.List[object]
@@ -4662,12 +4946,22 @@ function Invoke-Main {
     $pcId = $null; if ($guid) { $pcId = (Get-Sha256Hex ('CactusHacksDetector:' + $guid)).Substring(0, 16) }
     $osName = $null; $osBuild = $null; if ($os) { $osName = [string]$os.Caption; $osBuild = [string]$os.BuildNumber }
     $accounts = if ($script:Accounts) { $script:Accounts } else { Get-MinecraftAccountProfiles }
+    $tgt = $null
+    if ($script:TargetInstance) {
+        $ti = $script:TargetInstance
+        $tgt = [ordered]@{ pid = $ti.Pid; launcher = $ti.Launcher; instance = $ti.Instance; version = $ti.Version; loader = $ti.Loader; gameDir = (Hide-User $ti.GameDir) }
+    }
+    $prevUtc = $null
+    if ($script:PrevRun -and $script:PrevRun.timeUtc) { $pt0 = ConvertTo-RunTime $script:PrevRun.timeUtc; if ($pt0) { $prevUtc = $pt0.ToString('o') } }
     $meta = [ordered]@{
         pcId = $pcId; os = $osName; osBuild = $osBuild; psVersion = $PSVersionTable.PSVersion.ToString()
         admin = $script:IsAdmin; native = $script:Native; nativeError = (Limit-Text $script:NativeError 160)
         scriptSha256 = $script:ScriptSha; online = (-not $NoOnline); modsOnly = [bool]$ModsOnly
         modFolders = $folders.Count; jarCount = $jars.Count; bootUtc = $boot; gameRunning = (@($jvm).Count -gt 0)
         minecraftAccounts = $accounts
+        scanTarget = $tgt
+        usernameCheck = $script:UsernameCheck
+        previousScanUtc = $prevUtc
         durationSec = [math]::Round($sw.Elapsed.TotalSeconds)
     }
 
@@ -4739,6 +5033,7 @@ function Invoke-Main {
         }
     }
 
+    Write-LastRun $summary $script:SelectedAccount.Name
     Show-Report $summary $modsArr $jvm $aiResults
     Write-Host ''
     Write-Host ('  Done in {0}s.' -f [math]::Round($sw.Elapsed.TotalSeconds)) -ForegroundColor DarkGray
