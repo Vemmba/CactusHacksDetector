@@ -401,6 +401,26 @@ export function validateReport(input: unknown, ipHash: string, allowedHashes: st
       scriptVersion: str(r.scriptVersion, 20), trimLevel: int(r.trimLevel, 0, 5), generatedUtc: ts(r.generatedUtc),
       minecraftAccounts: { currentAccountName: str(accountInfo.currentAccountName, 16), alternateAccounts: arr(accountInfo.alternateAccounts, 20).map((x) => str(x, 16)).filter((x) => !!x), profiles: accountProfiles },
       modules: arr(r.modules, 40).map(obj).map((m) => ({ name: str(m.name, 60), status: str(m.status, 12), note: str(m.note, 160), findings: int(m.findings, 0, 100000) })),
+      deepTimeline: bool(meta.deepTimeline),
+      scanTarget: meta.scanTarget && typeof meta.scanTarget === 'object' ? {
+        pid: int(obj(meta.scanTarget).pid, 0, 10_000_000), launcher: str(obj(meta.scanTarget).launcher, 40), instance: str(obj(meta.scanTarget).instance, 80),
+        version: str(obj(meta.scanTarget).version, 60), loader: str(obj(meta.scanTarget).loader, 20), gameDir: str(obj(meta.scanTarget).gameDir, 200),
+      } : null,
+      usernameCheck: meta.usernameCheck && typeof meta.usernameCheck === 'object' ? {
+        method: str(obj(meta.usernameCheck).method, 30), attempts: int(obj(meta.usernameCheck).attempts, 0, 20), failures: int(obj(meta.usernameCheck).failures, 0, 20),
+        mojang: str(obj(meta.usernameCheck).mojang, 20), uuidMatch: bool(obj(meta.usernameCheck).uuidMatch),
+      } : null,
+      previousScanUtc: ts(meta.previousScanUtc),
+      instances: arr(meta.instances, 12).map(obj).map((i) => ({
+        launcher: str(i.launcher, 40), instance: str(i.instance, 80), running: bool(i.running), version: str(i.version, 60), loader: str(i.loader, 20),
+        gameDir: str(i.gameDir, 200), lastPlayedUtc: ts(i.lastPlayedUtc), modCount: int(i.modCount, 0, 100000), flaggedCount: int(i.flaggedCount, 0, 100000),
+        users: arr(i.users, 12).map(obj).map((u) => ({ name: str(u.name, 16), lastSeenUtc: ts(u.lastSeenUtc) })).filter((u) => !!u.name),
+        flagged: arr(i.flagged, 15).map(obj).map((f) => ({
+          file: str(f.file, 120), verdict: str(f.verdict, 60), hacks: arr(f.hacks, 8).map((x) => str(x, 60)).filter((x) => !!x),
+          createdUtc: ts(f.createdUtc), modifiedUtc: ts(f.modifiedUtc), loadedLastSession: bool(f.loadedLastSession), source: str(f.source, 100),
+        })),
+      })),
+      timeline: arr(meta.timeline, 40).map(obj).map((e) => ({ time: ts(e.time), kind: str(e.kind, 20), what: str(e.what, 200), where: str(e.where, 160), source: str(e.source, 40) })),
     },
     ip_hash: ipHash,
   };
@@ -431,7 +451,7 @@ export const AI_BACKOFF_MS = [2000, 5000, 12000];
 export const AI_DEFAULT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 export const AI_FALLBACK_MODEL = AI_DEFAULT_MODEL;
 export const AI_HEDGE_MS = 12_000;
-export const AI_RESULT_VERSION = 5;
+export const AI_RESULT_VERSION = 6;
 export const AI_STUCK_MINUTES = 5;
 export const AI_MAX_REQUEUES = 3;
 export const AI_DEFAULT_DELAY_MS = 2000;
@@ -555,7 +575,7 @@ HOW TO READ THE EVIDENCE
 - profile.mixins / mixinTargets: which game classes the mod patches, the injected method names, and 'at:' prefixed injection points.
 - profile.strings: text constants that look like module names, setting labels or messages.
 - profile.mappedReflection: strings that reach into obfuscated game internals by name (field_1234, method_5678, f_12345_, m_12345_), which is how cheats touch private state without mixins.
-- profile.api: how many classes use each notable call. Input and timing: robot, glfwInput, glfwCallback, nativeHook, lwjgl2Input, setKeyPressed, sleep, clock, random, gaussian. Aiming math: atan2, angleMath, setRotation, lookVec, eyePos. Combat: attackEntity, interactEntity, swing, attackCooldown, raycast, entityQuery, boundingBox, reachDistance, swapSlot, clickSlot. Movement: setVelocity, setPos, setOnGround, setSprinting. Packets: sendPacket, movePacket, interactPacket, swingPacket, clickPacket, actionPacket, keepAlivePacket, commandPacket. Rendering: depthOff, renderEvent, tickEvent, keyBinding. Evasion: reflectInvoke, setAccessible, reflectLookup, methodHandle, net, mcMethodRef.
+- profile.api: how many classes use each notable call. Input and timing: robot, glfwInput, glfwCallback, nativeHook, lwjgl2Input, setKeyPressed, sleep, clock, random, gaussian. Aiming math: atan2, angleMath, setRotation, lookVec, eyePos. Combat: attackEntity, interactEntity, swing, attackCooldown, raycast, entityQuery, boundingBox, reachDistance, swapSlot, slotField, slotPacket, clickSlot, crosshair (reads the crosshair target), entityHitResult, distCheck, reachAttr, weaponItem. Movement: setVelocity, setPos, setOnGround, setSprinting. Packets: sendPacket, velocityPacket, movePacket, interactPacket, swingPacket, clickPacket, actionPacket, keepAlivePacket, commandPacket. Rendering: depthOff, renderEvent, tickEvent, keyBinding. Evasion: reflectInvoke, setAccessible, reflectLookup, methodHandle, net, mcMethodRef.
 - profile.capabilities: the classes with the most notable call combinations, as 'class: call,call,call'. This is the per-class view. A small class whose calls add up to attacking, aiming, sending movement packets, clicking inventory slots or drawing through walls is a cheat module, whatever it is called.
 - profile.vocab: cheat vocabulary found. profile.obfuscation: share of short or look-alike names and encrypted-looking strings. profile.nested: jars inside the jar.
 
@@ -590,6 +610,7 @@ These are cheats on every server. Any of them is enough, even if the mod calls i
 - Known clients and their forks: Meteor and addons (Rejects, Trouser-Streak, Numby Hack), Wurst, LiquidBounce, Future, Impact, RusherHack, ThunderHack, Konas, Phobos, 3arthh4ck, Gamesense, Vape, Raven, Sigma, Rise, Tenacity, Astolfo, Novoline, Exhibition, Aristois, Salhack, BleachHack and similar. A renamed fork still has the same module and setting vocabulary.
 - Humanization: any random delay, jitter, variance or min and max timing on swap, attack, click or aim actions.
 Test for this category: does the code ACT for the player (attack, click, swap slots, aim, change velocity, send movement or interaction packets) or CHANGE a game value that decides combat outcomes? If yes, it is COMBAT_HACK.
+Class, method and field names can be random letters or Minecraft's own intermediary and SRG names (class_1297, method_2918, m_105223_, a.b.c). Never judge by names alone: judge by the api flags, behaviours, Minecraft calls and strings. A mod with unreadable names that attacks entities, reads the crosshair target and attacks, switches hotbar slots around attacks, raises reach above vanilla, or sends movement or interaction packets by hand is COMBAT_HACK.
 
 CATEGORY B: ADVANTAGE_MOD (verdict SUSPECT, score 30 to 49)
 Mods that give an advantage or are restricted on some servers, but do not act for the player and do not change combat values. They are policy decisions for staff, not outright hacks. Examples:

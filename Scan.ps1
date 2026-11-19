@@ -12,6 +12,7 @@ param(
     [switch]$NoUsn,
     [switch]$ModsOnly,
     [switch]$ScanVerified,
+    [switch]$SkipVerified,
     [switch]$JsonOnlyIfFlagged,
     [switch]$IncludeAccountProfiles,
     [switch]$Yes,
@@ -485,10 +486,99 @@ namespace CactusHacksDetector
             "autobreach", "autohitcrystal", "inventorytotem", "hovertotem", "autodoublehand", "keypearl", "autotpa", "webmacro",
             "autofirework", "elytraswap", "shielddisabler", "shieldbreaker", "axespam", "antibot", "rotationspoof",
             "silentrotation", "cpsbypass", "antimissclick", "tpaura", "nojumpdelay", "inventorystealer", "invcleaner", "maceaura",
-            "autoarmor", "autopot", "lagreach", "popswitch", "legitcrystal", "legitanchor", "legittotem"
+            "autoarmor", "autopot", "lagreach", "popswitch", "legitcrystal", "legitanchor", "legittotem",
+            "autocrit", "autoweapon", "silentswap", "packetfly", "elytrafly", "boatfly", "safewalk", "holefiller", "selftrap",
+            "autotrap", "autoweb", "autooffhand", "offhandcrystal", "backtrack", "hitboxexpander", "velocitycancel", "fastbow",
+            "autobow", "bowaimbot", "speedmine", "packetmine", "autosurround", "norotate"
         };
         private static readonly string[] VocabTok = new string[] { "esp", "aura", "xray", "bhop", "tracers", "nuker", "jesus" };
         private static readonly string[] StrongFlags = new string[] { "attackEntity", "interactEntity", "atan2", "setRotation", "movePacket", "interactPacket", "clickSlot", "clickPacket", "robot", "nativeHook", "glfwInput", "depthOff", "reachDistance", "swapSlot", "setVelocity", "setOnGround", "reflectInvoke", "setAccessible", "raycast", "entityQuery", "setSprinting", "swingPacket", "actionPacket", "commandPacket" };
+        private static readonly string[][] MixinRules = new string[][] {
+            new string[] { "(?i)(shouldDrawSide|shouldRenderFace|isSideVisible|isFaceVisible)", "Hooks block face culling with a mixin (xray behaviour)", "" },
+            new string[] { "(?i)(beginRenderTick|updateTimer)", "Hooks the game tick timer with a mixin (timer / game speed behaviour)", "" },
+            new string[] { "(?i)(getTargetingMargin|method_5871)", "Hooks the entity targeting margin with a mixin (hitbox expansion behaviour)", "" },
+            new string[] { "(?i)(isGlowing|method_5851|hasOutline)", "Hooks entity glow and outline with a mixin (glow ESP behaviour)", "" },
+            new string[] { "(?i)(sendImmediately|sendInternal|channelRead0)", "Hooks the packet send and receive path with a mixin (blink / fake lag / packet cancel behaviour)", "movePacket,interactPacket,swingPacket,actionPacket,velocityPacket" },
+            new string[] { "(?i)(isUsingItem|shouldSlowDown|method_6115)", "Hooks the item-use slowdown with a mixin (no slow behaviour)", "movePacket,setVelocity,setSprinting" },
+            new string[] { "(?i)(onAttacked|handleAttack|doAttack|method_1536)", "Hooks the attack action with a mixin (auto attack / criticals / combo behaviour)", "attackEntity,swing,sendPacket" }
+        };
+        private static readonly Dictionary<string, string> Inter = BuildInter();
+        private static Dictionary<string, string> BuildInter()
+        {
+            Dictionary<string, string> d = new Dictionary<string, string>();
+            string[] rows = new string[] {
+                "attackEntity=method_2918,method_34206,m_105223_",
+                "interactEntity=method_2905,method_2917,method_34207,method_34208",
+                "clickSlot=method_2906",
+                "useItem=method_2919,method_2896",
+                "swapSlot=method_2911",
+                "reachDistance=method_2904,method_55754,method_55755,method_3190",
+                "setPos=method_5814,method_33574,m_6034_",
+                "setOnGround=method_24830,m_6853_",
+                "setVelocity=method_5762,method_18799,method_18800,m_20256_,m_20334_",
+                "setRotation=method_36456,method_36457,method_5847,m_146922_,m_146926_",
+                "setSprinting=method_5728,m_6858_",
+                "eyePos=method_33571,method_5836,m_20299_",
+                "lookVec=method_5828,method_5720,m_20252_",
+                "boundingBox=method_5829,m_20191_",
+                "raycast=method_5745,method_17742",
+                "entityQuery=method_8390,method_8333,method_8335,method_18023,method_18467,m_6443_,m_6249_",
+                "sendPacket=method_52787,method_2883,method_10743",
+                "swing=method_6104,method_23667,m_6674_",
+                "attackCooldown=method_7261,m_36403_",
+                "distCheck=method_5739,method_5858,method_5707,m_20270_,m_20280_"
+            };
+            for (int i = 0; i < rows.Length; i++)
+            {
+                int eq = rows[i].IndexOf('=');
+                string flag = rows[i].Substring(0, eq);
+                string[] ids = rows[i].Substring(eq + 1).Split(',');
+                for (int k = 0; k < ids.Length; k++) d[ids[k]] = flag;
+            }
+            return d;
+        }
+        private static bool HasId(string c, string id)
+        {
+            int i = c.IndexOf(id, StringComparison.Ordinal);
+            while (i >= 0)
+            {
+                int e = i + id.Length;
+                if (e >= c.Length || c[e] < '0' || c[e] > '9') return true;
+                i = c.IndexOf(id, e, StringComparison.Ordinal);
+            }
+            return false;
+        }
+        private static bool IsEntityDesc(string t) { return t.EndsWith("/Entity;", StringComparison.Ordinal) || t.EndsWith("/class_1297;", StringComparison.Ordinal); }
+        private static bool IsPlayerDesc(string t) { return t.EndsWith("/Player;", StringComparison.Ordinal) || t.EndsWith("/PlayerEntity;", StringComparison.Ordinal) || t.EndsWith("/class_1657;", StringComparison.Ordinal) || t.EndsWith("/class_746;", StringComparison.Ordinal) || t.EndsWith("/LocalPlayer;", StringComparison.Ordinal); }
+        private static void NoteDesc(string o, string n, string d, HashSet<string> fl)
+        {
+            if (d == null || d.Length < 3 || d[0] != '(') return;
+            int close = d.IndexOf(')');
+            if (close < 0) return;
+            string args = d.Substring(1, close - 1);
+            string ret = d.Substring(close + 1);
+            bool mgr = o.EndsWith("MultiPlayerGameMode", StringComparison.Ordinal) || o.EndsWith("ClientPlayerInteractionManager", StringComparison.Ordinal) || HasId(o, "class_636");
+            if (mgr && ret == "V" && args.Length > 4)
+            {
+                string[] parts = args.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 2 && IsPlayerDesc(parts[0] + ";") && IsEntityDesc(parts[1] + ";")) fl.Add("attackEntity");
+            }
+            if (mgr && args.StartsWith("III", StringComparison.Ordinal) && ret == "V") fl.Add("clickSlot");
+            bool conn = o.EndsWith("ClientPacketListener", StringComparison.Ordinal) || o.EndsWith("ClientPlayNetworkHandler", StringComparison.Ordinal) || o.EndsWith("ClientCommonNetworkHandler", StringComparison.Ordinal)
+                || o.EndsWith("ClientConnection", StringComparison.Ordinal) || o.EndsWith("/Connection", StringComparison.Ordinal) || HasId(o, "class_634") || HasId(o, "class_8673") || HasId(o, "class_2535");
+            if (conn && ret == "V" && (args == "Lnet/minecraft/network/protocol/Packet;" || args == "Lnet/minecraft/network/packet/Packet;" || args == "Lnet/minecraft/class_2596;")) fl.Add("sendPacket");
+            if (ret.Length > 4 && args.Length > 0 && (args.IndexOf("ClipContext;", StringComparison.Ordinal) >= 0 || args.IndexOf("RaycastContext;", StringComparison.Ordinal) >= 0 || args.IndexOf("class_3959;", StringComparison.Ordinal) >= 0)) fl.Add("raycast");
+            if (args == "DFZ" && ret.EndsWith("HitResult;", StringComparison.Ordinal)) fl.Add("raycast");
+            if (ret == "Ljava/util/List;" && (args.IndexOf("/AABB;", StringComparison.Ordinal) >= 0 || args.IndexOf("/Box;", StringComparison.Ordinal) >= 0 || args.IndexOf("/class_238;", StringComparison.Ordinal) >= 0)
+                && (args.IndexOf("Ljava/lang/Class;", StringComparison.Ordinal) >= 0 || args.IndexOf("/Entity;", StringComparison.Ordinal) >= 0 || args.IndexOf("/class_1297;", StringComparison.Ordinal) >= 0 || args.IndexOf("TypeFilter;", StringComparison.Ordinal) >= 0 || args.IndexOf("EntityTypeTest;", StringComparison.Ordinal) >= 0 || args.IndexOf("class_5575;", StringComparison.Ordinal) >= 0)) fl.Add("entityQuery");
+        }
+        private static void NoteField(string o, string n, HashSet<string> fl)
+        {
+            bool client = o.EndsWith("/MinecraftClient", StringComparison.Ordinal) || o.EndsWith("/Minecraft", StringComparison.Ordinal) || HasId(o, "class_310");
+            if (client && (n == "crosshairTarget" || n == "hitResult" || n == "field_1765" || n == "f_91077_" || n == "crosshairPickEntity" || n == "targetedEntity" || n == "field_1692" || n == "f_91076_")) { fl.Add("crosshair"); return; }
+            bool inv = o.EndsWith("/PlayerInventory", StringComparison.Ordinal) || o.EndsWith("/Inventory", StringComparison.Ordinal) || HasId(o, "class_1661");
+            if (inv && (n == "selectedSlot" || n == "selected" || n == "field_7545" || n == "f_35977_")) fl.Add("slotField");
+        }
         private static readonly string[] PvpHints = new string[] { "totem", "pearl", "anchor", "crystal", "glowstone", "mace" };
 
         private static string Squash(string s)
@@ -607,7 +697,7 @@ namespace CactusHacksDetector
             return d;
         }
 
-        private static void Note(string o, string n, HashSet<string> fl)
+        private static void Note(string o, string n, string d, HashSet<string> fl)
         {
             bool mc = o.StartsWith("net/minecraft", StringComparison.Ordinal) || o.StartsWith("com/mojang", StringComparison.Ordinal);
             if (o == "java/lang/Math" || o == "java/lang/StrictMath")
@@ -646,9 +736,14 @@ namespace CactusHacksDetector
             if (o.IndexOf("KeyBindingHelper", StringComparison.Ordinal) >= 0 || (o.EndsWith("KeyMapping", StringComparison.Ordinal) && n == "<init>") || (o.EndsWith("KeyBinding", StringComparison.Ordinal) && n == "<init>")) fl.Add("keyBinding");
             if (n == "send" && (o.EndsWith("/ClientConnection", StringComparison.Ordinal) || o.EndsWith("/Connection", StringComparison.Ordinal))) { fl.Add("sendPacket"); return; }
             if (!mc) return;
+            NoteDesc(o, n, d, fl);
+            NoteField(o, n, fl);
+            string hit;
+            if (Inter.TryGetValue(n, out hit)) { fl.Add(hit); return; }
             if (n.StartsWith("method_", StringComparison.Ordinal) || (n.StartsWith("m_", StringComparison.Ordinal) && n.Length > 5)) { fl.Add("mcMethodRef"); return; }
             switch (n)
             {
+                case "distanceTo": case "squaredDistanceTo": case "distanceToSqr": fl.Add("distCheck"); break;
                 case "attackEntity": fl.Add("attackEntity"); break;
                 case "attack": if (o.EndsWith("MultiPlayerGameMode", StringComparison.Ordinal) || o.EndsWith("InteractionManager", StringComparison.Ordinal)) fl.Add("attackEntity"); break;
                 case "swingHand": case "swing": fl.Add("swing"); break;
@@ -681,6 +776,26 @@ namespace CactusHacksDetector
             else if (c.IndexOf("PlayerActionC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundPlayerActionPacket", StringComparison.Ordinal) >= 0) fl.Add("actionPacket");
             else if (c.IndexOf("KeepAliveC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundKeepAlivePacket", StringComparison.Ordinal) >= 0) fl.Add("keepAlivePacket");
             else if (c.IndexOf("ClientCommandC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundPlayerCommandPacket", StringComparison.Ordinal) >= 0) fl.Add("commandPacket");
+            else if (c.IndexOf("UpdateSelectedSlotC2SPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ServerboundSetCarriedItemPacket", StringComparison.Ordinal) >= 0) fl.Add("slotPacket");
+            else if (c.IndexOf("EntityVelocityUpdateS2CPacket", StringComparison.Ordinal) >= 0 || c.IndexOf("ClientboundSetEntityMotionPacket", StringComparison.Ordinal) >= 0) fl.Add("velocityPacket");
+            else if (c.EndsWith("/EntityHitResult", StringComparison.Ordinal)) fl.Add("entityHitResult");
+            else if (c.EndsWith("/EntityAttributeModifier", StringComparison.Ordinal) || c.EndsWith("/AttributeModifier", StringComparison.Ordinal)) fl.Add("attributeMod");
+            else if (c.EndsWith("/SwordItem", StringComparison.Ordinal) || c.EndsWith("/AxeItem", StringComparison.Ordinal) || c.EndsWith("/MaceItem", StringComparison.Ordinal) || c.EndsWith("/TridentItem", StringComparison.Ordinal)) fl.Add("weaponItem");
+            if (c.IndexOf("class_", StringComparison.Ordinal) >= 0)
+            {
+                if (HasId(c, "class_2828")) fl.Add("movePacket");
+                else if (HasId(c, "class_2824")) fl.Add("interactPacket");
+                else if (HasId(c, "class_2879")) fl.Add("swingPacket");
+                else if (HasId(c, "class_2813")) fl.Add("clickPacket");
+                else if (HasId(c, "class_2846")) fl.Add("actionPacket");
+                else if (HasId(c, "class_2827")) fl.Add("keepAlivePacket");
+                else if (HasId(c, "class_2848")) fl.Add("commandPacket");
+                else if (HasId(c, "class_2868")) fl.Add("slotPacket");
+                else if (HasId(c, "class_2743")) fl.Add("velocityPacket");
+                else if (HasId(c, "class_3966")) fl.Add("entityHitResult");
+                else if (HasId(c, "class_1322")) fl.Add("attributeMod");
+                else if (HasId(c, "class_1829") || HasId(c, "class_1743")) fl.Add("weaponItem");
+            }
         }
 
         private static void ReadElem(byte[] b, ref int p, Pool pool, string annType, string elemName, Parsed ps, int depth)
@@ -756,7 +871,16 @@ namespace CactusHacksDetector
                 int t = b[p]; pool.Tag[i] = t; p++;
                 if (t == 1) { int ul = U2(b, p); p += 2; pool.Utf[i] = Encoding.UTF8.GetString(b, p, ul); p += ul; }
                 else if (t == 3 || t == 4) { p += 4; }
-                else if (t == 5 || t == 6) { p += 8; i++; }
+                else if (t == 5 || t == 6)
+                {
+                    if (t == 6)
+                    {
+                        long bits = ((long)S4(b, p) << 32) | ((long)S4(b, p + 4) & 0xFFFFFFFFL);
+                        double dv = BitConverter.Int64BitsToDouble(bits);
+                        if (dv > 3.05 && dv < 6.6) ps.Flags.Add("reachConst");
+                    }
+                    p += 8; i++;
+                }
                 else if (t == 7 || t == 8 || t == 16 || t == 19 || t == 20) { pool.A[i] = U2(b, p); p += 2; }
                 else if (t == 9 || t == 10 || t == 11 || t == 12 || t == 17 || t == 18) { pool.A[i] = U2(b, p); pool.C[i] = U2(b, p + 2); p += 4; }
                 else if (t == 15) { p += 3; }
@@ -769,7 +893,12 @@ namespace CactusHacksDetector
             for (int i = 1; i < n; i++)
             {
                 int tg = pool.Tag[i];
-                if (tg == 8) { string s = pool.Str(pool.A[i]); if (s.Length > 0 && ps.Strings.Count < 3000) ps.Strings.Add(s); }
+                if (tg == 8)
+                {
+                    string s = pool.Str(pool.A[i]);
+                    if (s.Length > 0 && ps.Strings.Count < 3000) ps.Strings.Add(s);
+                    if (s.Length > 8 && s.Length < 80 && (s.IndexOf("interaction_range", StringComparison.Ordinal) >= 0 || s.IndexOf("attack_range", StringComparison.Ordinal) >= 0 || s.IndexOf("attack_reach", StringComparison.Ordinal) >= 0)) ps.Flags.Add("reachAttr");
+                }
                 else if (tg == 7) { string c = pool.ClassName(i); if (c.Length > 0) NoteClass(c, ps.Flags); }
             }
             try
@@ -825,7 +954,7 @@ namespace CactusHacksDetector
                     if (cls <= 0 || cls >= n || nt <= 0 || nt >= n) continue;
                     string o = pool.ClassName(cls);
                     string nm = pool.Str(pool.A[nt]);
-                    if (o.Length > 0 && nm.Length > 0) Note(o, nm, ps.Flags);
+                    if (o.Length > 0 && nm.Length > 0) Note(o, nm, pool.Str(pool.C[nt]), ps.Flags);
                 }
             }
             return ps;
@@ -982,7 +1111,7 @@ namespace CactusHacksDetector
             List<string> capKeep = new List<string>();
             foreach (string k in fl2)
             {
-                if (k == "mcMethodRef") continue;
+                if (k == "mcMethodRef" || k == "reachConst") continue;
                 capKeep.Add(k);
                 capW += Array.IndexOf(StrongFlags, k) >= 0 ? 2 : 1;
             }
@@ -1025,10 +1154,41 @@ namespace CactusHacksDetector
                 AddBehavior(behaviors, "Draws lines/boxes to entities from the eye position (ESP / tracer behaviour)", cls);
             if ((f.Contains("robot") || f.Contains("glfwInput") || f.Contains("nativeHook") || f.Contains("setKeyPressed")) && rnd && timing && hintClick)
                 AddBehavior(behaviors, "Generates input on its own with random delays (autoclicker / jitter / macro behaviour)", cls);
-            if (f.Contains("swapSlot") && f.Contains("attackEntity"))
+            bool slot = f.Contains("swapSlot") || f.Contains("slotPacket") || f.Contains("slotField");
+            bool cross = f.Contains("crosshair");
+            bool timed = timing || rnd || f.Contains("attackCooldown") || f.Contains("tickEvent");
+            if (slot && f.Contains("attackEntity"))
                 AddBehavior(behaviors, "Switches hotbar slot and attacks in one class (weapon swap / mace swap behaviour)", cls);
+            else if (slot && f.Contains("weaponItem") && (target || cross || f.Contains("attackCooldown")))
+                AddBehavior(behaviors, "Picks a weapon item and switches the hotbar slot around attacks (auto weapon / auto swap behaviour)", cls);
+            else if (f.Contains("slotPacket") && f.Contains("sendPacket") && (cross || target))
+                AddBehavior(behaviors, "Sends hotbar slot packets while targeting entities (silent swap / mace swap behaviour)", cls);
+            if (f.Contains("attackEntity") && cross && f.Contains("entityHitResult") && timed)
+                AddBehavior(behaviors, "Reads the entity under the crosshair and attacks it from code (triggerbot behaviour)", cls);
+            if ((f.Contains("attackEntity") || f.Contains("interactPacket")) && f.Contains("distCheck") && f.Contains("reachConst") && target)
+                AddBehavior(behaviors, "Attacks entities using its own distance limit above vanilla reach (reach behaviour)", cls);
+            if (f.Contains("reachAttr") && f.Contains("attributeMod"))
+                AddBehavior(behaviors, "Changes the player's reach attribute from code (reach behaviour)", cls);
             if (mixin && f.Contains("reachDistance"))
                 AddBehavior(behaviors, "Hooks the interaction/reach distance (reach behaviour)", cls);
+            if (f.Contains("useItem") && (f.Contains("setRotation") || f.Contains("movePacket")) && slot && timed)
+                AddBehavior(behaviors, "Places blocks while rotating and switching hotbar slots on a timer (scaffold / tower behaviour)", cls);
+            if (f.Contains("actionPacket") && f.Contains("sendPacket") && timed && !mixin)
+                AddBehavior(behaviors, "Sends block-break action packets by hand on a timer (nuker / fast break / packet mine behaviour)", cls);
+            if (f.Contains("movePacket") && f.Contains("sendPacket") && f.Contains("attackEntity"))
+                AddBehavior(behaviors, "Sends position packets around attacks (criticals behaviour)", cls);
+            if (f.Contains("setSprinting") && f.Contains("attackEntity") && (f.Contains("commandPacket") || f.Contains("setKeyPressed") || timed))
+                AddBehavior(behaviors, "Toggles sprint around attacks (W-tap / sprint reset behaviour)", cls);
+            if (f.Contains("attackEntity") && target && f.Contains("useItem") && hintPvp)
+                AddBehavior(behaviors, "Places and attacks crystals or anchors from code (auto crystal / anchor aura behaviour)", cls);
+            if (f.Contains("useItem") && slot && hintPvp && timed && !f.Contains("attackEntity"))
+                AddBehavior(behaviors, "Switches hotbar slots and uses items on a timer (auto pearl / firework / potion / totem macro behaviour)", cls);
+            if (f.Contains("setVelocity") && f.Contains("lookVec") && f.Contains("tickEvent") && !mixin)
+                AddBehavior(behaviors, "Sets the player's velocity along the view direction every tick (fly / speed / boost behaviour)", cls);
+            if ((f.Contains("clickSlot") || f.Contains("clickPacket")) && rnd && timing && !hintPvp)
+                AddBehavior(behaviors, "Clicks container slots by code with random delays (chest stealer / inventory manager behaviour)", cls);
+            if (f.Contains("setRotation") && target && rnd && timed && !mixin)
+                AddBehavior(behaviors, "Rotates toward targets with random smoothing (aim assist / humanized aim behaviour)", cls);
         }
 
         public void AddLang(string text)
@@ -1082,7 +1242,7 @@ namespace CactusHacksDetector
                 res.Add(new string[] { kv.Key, detail });
             }
             Regex kb = new Regex("(?i)(velocity|knockback|takeknockback|applyknockback|deltamovement)");
-            Regex reach = new Regex("(?i)(getreachdistance|interactionrange|reachdistance|getattackrange|extendreach|entityreach)");
+            Regex reach = new Regex("(?i)(getreachdistance|interactionrange|reachdistance|getattackrange|extendreach|entityreach|updatetargetedentity|method_3190|method_2904|method_55754|method_55755)");
             Regex cool = new Regex("(?i)(itemusecooldown|blockbreakingcooldown|attackcooldown|dodoattack|doitemuse|rightclickdelay|handleblockbreaking|updateblockbreakingprogress|hitdelay|blockhitdelay)");
             Regex onground = new Regex("(?i)(isonground|setonground|onground)");
             string kbHit = null; string reachHit = null; string coolHit = null; string groundHit = null;
@@ -1098,6 +1258,25 @@ namespace CactusHacksDetector
             }
             if (kbHit != null && mixins.Count > 0) res.Add(new string[] { "Hooks knockback/velocity handling with a mixin (anti-knockback / velocity behaviour)", kbHit });
             if (reachHit != null && mixins.Count > 0) res.Add(new string[] { "Hooks the interaction/reach distance with a mixin (reach behaviour)", reachHit });
+            if (mixins.Count > 0)
+            {
+                for (int mr = 0; mr < MixinRules.Length; mr++)
+                {
+                    string need = MixinRules[mr][2];
+                    if (need.Length > 0)
+                    {
+                        bool anyNeed = false;
+                        string[] nf = need.Split(',');
+                        for (int q = 0; q < nf.Length; q++) { if (api.ContainsKey(nf[q])) { anyNeed = true; break; } }
+                        if (!anyNeed) continue;
+                    }
+                    Regex rr = new Regex(MixinRules[mr][0]);
+                    string rhit = null;
+                    foreach (string p2 in probe) { string q2 = p2.StartsWith("at:", StringComparison.Ordinal) ? p2.Substring(3) : p2; if (rr.IsMatch(q2)) { rhit = q2; break; } }
+                    if (rhit != null) res.Add(new string[] { MixinRules[mr][1], rhit });
+                }
+            }
+            if (api.ContainsKey("velocityPacket") && mixins.Count > 0) res.Add(new string[] { "Hooks velocity packets with a mixin (anti-knockback / velocity behaviour)", "EntityVelocityUpdate packet" });
             if (coolHit != null && mixins.Count > 0) res.Add(new string[] { "Hooks use/attack/break cooldowns with a mixin (fast place / fast break / autoclicker behaviour)", coolHit });
             if (groundHit != null && mixins.Count > 0 && api.ContainsKey("movePacket")) res.Add(new string[] { "Hooks the on-ground flag and sends movement packets (nofall / fly behaviour)", groundHit });
             int refl = 0;
@@ -1422,9 +1601,9 @@ function Get-HackKind([string]$Name, [string]$Cat) {
 
 $Sig = @{
 
-    Clients = '(?i)(liquid[-_ ]?bounce|meteor[-_ ]?client|meteordevelopment|(?<![a-z])wurst(?:[-_ ]?client)?(?![a-z])|net/wurstclient|aristois|impact[-_ ]?client|future[-_ ]?client|rusher[-_ ]?hack|thunder[-_ ]?hack|pandaware|(?<![a-z])asteria(?![a-z])|(?<![a-z])xenon[-_ ]?client|vape[-_ ]?(?:v4|lite|client)|(?<![a-z])vapev4|doomsday[-_ ]?client|prestige[-_ ]?client|(?<![a-z])konas(?![a-z])|3arthh4ck|salhack|bleach[-_ ]?hack|coffee[-_ ]?client|inertia[-_ ]?client|sigma[-_ ]?client|novoline|exhibition[-_ ]?client|astolfo[-_ ]?(?:client|hack|utils|ware)|(?:club|dev|me|net|com)[/.]astolfo|raven[-_ ]?b[0-9s]|lunar[-_ ]?cheat|fdp[-_ ]?client|(?<![a-z])nodus(?![a-z])|kami[-_ ]?blue|forgehax|tenacity[-_ ]?client|rise[-_ ]?client|slinky[-_ ]?client|moonlight[-_ ]?client|zeroday[-_ ]?client|dortware|hanabi[-_ ]?client|augustus[-_ ]?client|trollhack|gamesense[-_ ]?client|xulu[-_ ]?client|cosmos[-_ ]?client|boze[-_ ]?client|opai[-_ ]?client|cat[-_ ]?lean|argon[-_ ]?client|gypsy[-_ ]?client|virgin[-_ ]?client|grim[-_ ]?client|nova[-_ ]?client|(?<![a-z])hellion(?![a-z])|phobos[-_ ]?(?:client|hack|plus)|me[/.]earth[/.]phobos|wexside|wave[-_ ]?client|mio[-_ ]?client|lemon[-_ ]?client|ares[-_ ]?client|entropy[-_ ]?client|celestial[-_ ]?client|akira[-_ ]?client|rinor[-_ ]?client|ozone[-_ ]?client|tarasande|azura[-_ ]?client|drip[-_ ]?client|remix[-_ ]?client|flux[-_ ]?client|wolfram[-_ ]?client|meteor[-_ ]?rejects|trouser[-_ ]?streak|numby[-_ ]?hack|anti[-_ ]?cope|banana[-_ ]?plus|pyro[-_ ]?client|dqrkis|lvstrng|vape\.gg|intent\.store|rise\.today|club[/.]maxstats|wtf[/.]moonlight|me[/.]zeroeightsix|net[/.]ccbluex|today[/.]opai|com[/.]alan[/.]clients|dev[.]gambleclient|xyz[/.]greaj|(?:dev|skid)[/.]krypton)'
+    Clients = '(?i)(liquid[-_ ]?bounce|meteor[-_ ]?client|meteordevelopment|(?<![a-z])wurst(?:[-_ ]?client)?(?![a-z])|net/wurstclient|aristois|impact[-_ ]?client|future[-_ ]?client|rusher[-_ ]?hack|thunder[-_ ]?hack|pandaware|(?<![a-z])asteria(?![a-z])|(?<![a-z])xenon[-_ ]?client|vape[-_ ]?(?:v4|lite|client)|(?<![a-z])vapev4|doomsday[-_ ]?client|prestige[-_ ]?client|(?<![a-z])konas(?![a-z])|3arthh4ck|salhack|bleach[-_ ]?hack|coffee[-_ ]?client|inertia[-_ ]?client|sigma[-_ ]?client|novoline|exhibition[-_ ]?client|astolfo[-_ ]?(?:client|hack|utils|ware)|(?:club|dev|me|net|com)[/.]astolfo|raven[-_ ]?b[0-9s]|lunar[-_ ]?cheat|fdp[-_ ]?client|(?<![a-z])nodus(?![a-z])|kami[-_ ]?blue|forgehax|tenacity[-_ ]?client|rise[-_ ]?client|slinky[-_ ]?client|moonlight[-_ ]?client|zeroday[-_ ]?client|dortware|hanabi[-_ ]?client|augustus[-_ ]?client|trollhack|gamesense[-_ ]?client|xulu[-_ ]?client|cosmos[-_ ]?client|boze[-_ ]?client|opai[-_ ]?client|cat[-_ ]?lean|argon[-_ ]?client|gypsy[-_ ]?client|virgin[-_ ]?client|grim[-_ ]?client|nova[-_ ]?client|(?<![a-z])hellion(?![a-z])|phobos[-_ ]?(?:client|hack|plus)|me[/.]earth[/.]phobos|wexside|wave[-_ ]?client|mio[-_ ]?client|lemon[-_ ]?client|ares[-_ ]?client|entropy[-_ ]?client|celestial[-_ ]?client|akira[-_ ]?client|rinor[-_ ]?client|ozone[-_ ]?client|tarasande|azura[-_ ]?client|drip[-_ ]?client|remix[-_ ]?client|flux[-_ ]?client|wolfram[-_ ]?client|meteor[-_ ]?rejects|trouser[-_ ]?streak|numby[-_ ]?hack|anti[-_ ]?cope|banana[-_ ]?plus|pyro[-_ ]?client|dqrkis|lvstrng|vape\.gg|intent\.store|rise\.today|club[/.]maxstats|wtf[/.]moonlight|me[/.]zeroeightsix|net[/.]ccbluex|today[/.]opai|com[/.]alan[/.]clients|dev[.]gambleclient|xyz[/.]greaj|(?:dev|skid)[/.]krypton|nursultan|expensive[-_ ]?client|excellent[-_ ]?client|minced[-_ ]?client|nixware|raven[-_ ]?xd|nightx[-_ ]?client|jello[-_ ]?client|ghost[-_ ]?client)'
 
-    Modules = '(?i)(kill[-_ ]?aura|crystal[-_ ]?aura|auto[-_ ]?crystal|trigger[-_ ]?bot|aim[-_ ]?(?:assist|bot)|silent[-_ ]?aim|anchor[-_ ]?macro|auto[-_ ]?(?:totem|clicker|pearl|armor|anchor|sword|pot)|no[-_ ]?(?:knockback|fall(?:[-_ ]?damage)?|slow(?:[-_ ]?down)?)(?-i:(?![a-z]))|fly[-_ ]?hack|speed[-_ ]?hack|x[-_ ]?ray[-_ ]?hack|player[-_ ]?esp|chest[-_ ]?(?:esp|steal)|cheststealer|fast[-_ ]?(?:place|break)|scaffold(?!ing)|hitbox(?:es)?[-_ ]?(?:expand|hack)|reach[-_ ]?(?:hack|extend)|velocity[-_ ]?(?:hack|cancel)|bunny[-_ ]?hop|jesus[-_ ]?hack|bed[-_ ]?aura|jitter[-_ ]?click(?:er)?|auto[-_ ]?hit(?-i:(?![a-z]))|hit[-_ ]?select(?-i:(?![a-z]))|(?<![a-z0-9_])w[-_ ]?tap(?![a-z])|auto[-_ ]?(?:double[-_ ]?hand|dtap|neth[-_ ]?pot|tpa|firework|breach|inventory[-_ ]?totem)|stun[-_ ]?slam|(?:mace|spear|elytra)[-_ ]?swap|shield[-_ ]?(?:breaker|disabler)|axe[-_ ]?spam|web[-_ ]?macro|key[-_ ]?pearl|(?:hover|legit)[-_ ]?totem|ping[-_ ]?spoof|anti[-_ ]?miss[-_ ]?click|lag[-_ ]?reach|pop[-_ ]?switch|sprint[-_ ]?reset|fake[-_ ]?inv(?![a-z])|pack[-_ ]?spoof|(?<![a-z])(?:double|safe|air)[-_ ]?anchor|anchor[-_ ]?aura|loot[-_ ]?yeeter|walsk?y[-_ ]?(?:crystal[-_ ]?)?optimizer|grim[-_ ]?(?:velocity|disabler)|target[-_ ]?strafe|(?:boat|packet)[-_ ]?fly|(?:player|entity|storage|block|ore|item|mob)[-_ ]?esp(?-i:(?![a-z]))|cave[-_ ]?finder|tp[-_ ]?aura|attack[-_ ]?aura|click[-_ ]?aura|multi[-_ ]?aura|mace[-_ ]?(?:aura|killer|spam)|no[-_ ]?jump[-_ ]?delay|anti[-_ ]?web|fake[-_ ]?lag|lag[-_ ]?switch|timer[-_ ]?hack|packet[-_ ]?(?:cancel|delay)(?-i:(?![a-z]))|inv(?:entory)?[-_ ]?(?:cleaner|stealer)|auto[-_ ]?miner|legit[-_ ]?(?:crystal|anchor)|hit[-_ ]?crystal|(?:rotation|packet)[-_ ]?spoof)'
+    Modules = '(?i)(kill[-_ ]?aura|crystal[-_ ]?aura|auto[-_ ]?crystal|trigger[-_ ]?bot|aim[-_ ]?(?:assist|bot)|silent[-_ ]?aim|anchor[-_ ]?macro|auto[-_ ]?(?:totem|clicker|pearl|armor|anchor|sword|pot)|no[-_ ]?(?:knockback|fall(?:[-_ ]?damage)?|slow(?:[-_ ]?down)?)(?-i:(?![a-z]))|fly[-_ ]?hack|speed[-_ ]?hack|x[-_ ]?ray[-_ ]?hack|player[-_ ]?esp|chest[-_ ]?(?:esp|steal)|cheststealer|fast[-_ ]?(?:place|break)|scaffold(?!ing)|hitbox(?:es)?[-_ ]?(?:expand|hack)|reach[-_ ]?(?:hack|extend)|velocity[-_ ]?(?:hack|cancel)|bunny[-_ ]?hop|jesus[-_ ]?hack|bed[-_ ]?aura|jitter[-_ ]?click(?:er)?|auto[-_ ]?hit(?-i:(?![a-z]))|hit[-_ ]?select(?-i:(?![a-z]))|(?<![a-z0-9_])w[-_ ]?tap(?![a-z])|auto[-_ ]?(?:double[-_ ]?hand|dtap|neth[-_ ]?pot|tpa|firework|breach|inventory[-_ ]?totem)|stun[-_ ]?slam|(?:mace|spear|elytra)[-_ ]?swap|shield[-_ ]?(?:breaker|disabler)|axe[-_ ]?spam|web[-_ ]?macro|key[-_ ]?pearl|(?:hover|legit)[-_ ]?totem|ping[-_ ]?spoof|anti[-_ ]?miss[-_ ]?click|lag[-_ ]?reach|pop[-_ ]?switch|sprint[-_ ]?reset|fake[-_ ]?inv(?![a-z])|pack[-_ ]?spoof|(?<![a-z])(?:double|safe|air)[-_ ]?anchor|anchor[-_ ]?aura|loot[-_ ]?yeeter|walsk?y[-_ ]?(?:crystal[-_ ]?)?optimizer|grim[-_ ]?(?:velocity|disabler)|target[-_ ]?strafe|(?:boat|packet)[-_ ]?fly|(?:player|entity|storage|block|ore|item|mob)[-_ ]?esp(?-i:(?![a-z]))|cave[-_ ]?finder|tp[-_ ]?aura|attack[-_ ]?aura|click[-_ ]?aura|multi[-_ ]?aura|mace[-_ ]?(?:aura|killer|spam)|no[-_ ]?jump[-_ ]?delay|anti[-_ ]?web|fake[-_ ]?lag|lag[-_ ]?switch|timer[-_ ]?hack|packet[-_ ]?(?:cancel|delay)(?-i:(?![a-z]))|inv(?:entory)?[-_ ]?(?:cleaner|stealer)|auto[-_ ]?miner|legit[-_ ]?(?:crystal|anchor)|hit[-_ ]?crystal|(?:rotation|packet)[-_ ]?spoof|auto[-_ ]?(?:crit|weapon|trap|web|offhand)|silent[-_ ]?swap|packet[-_ ]?fly|elytra[-_ ]?fly|safe[-_ ]?walk|hole[-_ ]?filler|self[-_ ]?trap|back[-_ ]?track|criticals|auto[-_ ]?surround|fast[-_ ]?(?:use|bow)|no[-_ ]?rotate|(?:speed|packet)[-_ ]?mine)'
 
     ModulesWeakLeaf = '(?i)^(esp|xray|fullbright|nametags|fly|speed|reach|velocity|criticals|antiknockback|autosprint|step|phase|blink|nofall|freecam|tracers|nuker|timer|sneak|spider|jesus|longjump|highjump|airjump|waterwalk|strafe|bhop|safewalk|antikb|hitboxes|aimassist|killaura|triggerbot|autoclicker|scaffold|noslow|nofalldamage|autototem|autoarmor|autopot|autopearl|clicker|aimbot|antibot|autoblock|fastplace|fastbreak|reachhack|autocrystal|crystalaura|bedaura|anchoraura|autoanchor|noknockback|autodtap|wtap|hitselect|stunslam|maceaura|autoweb|antiweb|invcleaner|chestesp|playeresp|autominer|tpaura|clickaura|attackaura|multiaura)(module|hack|mod)?$'
     Bypass  = '(?i)(grim[-_]?bypass|vulcan[-_]?bypass|watchdog[-_]?bypass|matrix[-_]?bypass|nocheat[-_]?bypass|anticheat[-_]?bypass|hypixel[-_]?bypass|spartan[-_]?bypass|verus[-_]?bypass|intave[-_]?bypass)'
@@ -2214,6 +2393,8 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
     if ($pb) {
         foreach ($bh in $pb.Behaviors()) {
             $findings.Add((New-Finding 'medium' 'cheat-behavior' $bh[0] (Limit-Text $bh[1] 160) $Label))
+            $bn = [regex]::Match([string]$bh[0], '\(([^()]+?) behaviour\)\s*$')
+            if ($bn.Success) { Add-Hack $State (($bn.Groups[1].Value -replace '\s*/\s*', '/') + ' (behaviour)') '' ([string]$bh[0]) 'behavior' }
         }
         $vt = @($pb.VocabTerms())
         if ($vt.Count -ge 3) {
@@ -2401,7 +2582,7 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
         $fs = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite, Delete')
         $zip = New-Object IO.Compression.ZipArchive($fs, [IO.Compression.ZipArchiveMode]::Read)
         $meta = Get-ModMeta $zip
-        if ($verified -and -not $ScanVerified) { $skipped = $true }
+        if ($verified -and $SkipVerified) { $skipped = $true }
         else {
             $r = Scan-Archive $zip $File.Name 0 $state
             foreach ($f in $r.Findings) { $findings.Add($f) }
@@ -2518,7 +2699,10 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
     elseif ($evMed -ge 2 -or ($evMed -ge 1 -and ($codeHacks.Count -ge 1 -or $structMed -ge 1)) -or $structMed -ge 3) { $verdict = 'SUSPICIOUS' }
     elseif ($verified) { $verdict = 'VERIFIED' }
     if ($legit -and $verified -and $verdict -eq 'VERIFIED') { $verdict = 'VERIFIED (legit tool: ' + $legit + ')' }
-    if ($verified -and $verdict -in 'CHEAT', 'MALWARE', 'SUSPICIOUS' -and -not $policy) { $verdict = "$verdict (verified hash: probable false positive)" }
+    if ($verified -and $verdict -in 'CHEAT', 'MALWARE', 'SUSPICIOUS' -and -not $policy) {
+        if (-not $legit -and $verdict -ne 'MALWARE' -and ($codeHacks.Count -ge 2 -or $strongHacks.Count -ge 3 -or $behFindings.Count -ge 3)) { $verdict = 'SUSPICIOUS (hack behaviour found in a Modrinth-hosted mod)' }
+        else { $verdict = "$verdict (verified hash: probable false positive)" }
+    }
 
     if ($inactive -and ($verdict -like 'CHEAT*')) { $verdict = 'SUSPICIOUS (inactive copy)' }
 
@@ -2540,6 +2724,8 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
         Source       = $src.Url
         SourceTrust  = $src.Trust
         ModifiedUtc  = $File.LastWriteTimeUtc.ToString('o')
+        CreatedUtc   = $File.CreationTimeUtc.ToString('o')
+        AccessedUtc  = $File.LastAccessTimeUtc.ToString('o')
         Classes      = $classCount
         NestedJars   = $state.NestedJars
         DeepScanned  = (-not $skipped)
@@ -2641,8 +2827,13 @@ function Get-LauncherInfo([string]$Path) {
         @('Lunar Client', '(?i)\\\.lunarclient'),
         @('Badlion Client', '(?i)\\\.badlion')
     )
-    $leaf = Split-Path -Leaf $p
-    if ($leaf -match '^\.?minecraft$') { $parent = Split-Path -Parent $p; if ($parent) { $leaf = Split-Path -Leaf $parent } }
+    $cur = $p.TrimEnd('\')
+    $leaf = Split-Path -Leaf $cur
+    for ($n = 0; $n -lt 2 -and $leaf -match '^(\.?minecraft|mods)$'; $n++) {
+        $cur = Split-Path -Parent $cur
+        if (-not $cur) { break }
+        $leaf = Split-Path -Leaf $cur
+    }
     foreach ($r in $rules) {
         $m = [regex]::Match($p, $r[1])
         if ($m.Success) {
@@ -2651,7 +2842,7 @@ function Get-LauncherInfo([string]$Path) {
             return [pscustomobject]@{ Launcher = $r[0]; Instance = $inst }
         }
     }
-    if ($p -match '(?i)\\\.minecraft\\?$') { return [pscustomobject]@{ Launcher = 'Minecraft Launcher'; Instance = 'default (.minecraft)' } }
+    if ($p -match '(?i)\\\.minecraft(\\|$)') { return [pscustomobject]@{ Launcher = 'Minecraft Launcher'; Instance = 'default (.minecraft)' } }
     return [pscustomobject]@{ Launcher = 'Custom folder'; Instance = $leaf }
 }
 
@@ -3166,7 +3357,14 @@ function Scan-GameLogs([string]$GameDir, $KnownModIds) {
         if ($gone.Count -gt 0) {
             $bad = @($gone | Where-Object { $Rx.Clients.IsMatch($_) -or $Rx.Modules.IsMatch($_) })
             if ($bad.Count -gt 0) { Add-Sys 'high' 'deleted' 'Cheat mod was loaded in the last game session but its jar is gone' ($bad -join ', ') $null 'logs/latest.log vs mods folder' }
-            Add-Sys 'low' 'deleted' 'Mods loaded in the last session but not in the mods folder now' ("{0}: {1}" -f $gone.Count, ((@($gone) | Select-Object -First 15) -join ', ')) $null 'logs/latest.log vs mods folder'
+            $liveGone = $false
+            foreach ($ri in @($script:Instances)) { if ($ri.GameDir -and ([string]$ri.GameDir).TrimEnd('\') -ieq $GameDir.TrimEnd('\')) { $liveGone = $true } }
+            if ($liveGone) {
+                $liveSev = 'medium'; if ($bad.Count -gt 0) { $liveSev = 'high' }
+                Add-Sys $liveSev 'injected' 'The running game has mods loaded that are not in its mods folder (injected, or loaded from another folder)' ("{0}: {1}" -f $gone.Count, ((@($gone) | Select-Object -First 15) -join ', ')) $null 'logs/latest.log vs mods folder'
+            } else {
+                Add-Sys 'low' 'deleted' 'Mods loaded in the last session but not in the mods folder now' ("{0}: {1}" -f $gone.Count, ((@($gone) | Select-Object -First 15) -join ', ')) $null 'logs/latest.log vs mods folder'
+            }
         }
     }
 
@@ -3254,6 +3452,34 @@ function Invoke-ProcessChecks {
     }
 }
 
+function Find-StrayModJars($KnownPaths) {
+    $found = New-Object System.Collections.Generic.List[object]
+    $roots = New-Object System.Collections.Generic.List[string]
+    if ($env:USERPROFILE) { foreach ($b in 'Downloads', 'Desktop', 'Documents') { $roots.Add((Join-Path $env:USERPROFILE $b)) } }
+    if ($env:TEMP) { $roots.Add($env:TEMP) }
+    if ($env:APPDATA) { $roots.Add((Join-Path $env:APPDATA '.minecraft')) }
+    foreach ($ri in @($script:Instances)) { if ($ri.GameDir) { $roots.Add([string]$ri.GameDir) } }
+    $cut = $script:NowUtc.AddDays(-120)
+    $metaNames = 'fabric.mod.json', 'quilt.mod.json', 'META-INF/mods.toml', 'META-INF/neoforge.mods.toml', 'mcmod.info'
+    foreach ($r in @($roots | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $r)) { continue }
+        $depth = 2
+        if ($r -match '(?i)\.minecraft|instances|\\mods$') { $depth = 1 }
+        $cands = @(Get-ChildItem -LiteralPath $r -File -Recurse -Depth $depth -Filter '*.jar' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 2KB -and $_.Length -lt 80MB -and $_.LastWriteTimeUtc -gt $cut -and -not $KnownPaths.ContainsKey($_.FullName) } | Select-Object -First 150)
+        foreach ($fi in $cands) {
+            $isMod = $false
+            try {
+                $z = [IO.Compression.ZipFile]::OpenRead($fi.FullName)
+                try { foreach ($en in $z.Entries) { if ($metaNames -contains $en.FullName) { $isMod = $true; break } } } finally { $z.Dispose() }
+            } catch {}
+            if ($isMod) { $found.Add($fi) }
+            if ($found.Count -ge 60) { break }
+        }
+    }
+    return $found.ToArray()
+}
+
 function Get-JvmModuleFindings([int]$ProcId) {
     $out = @()
     $mods = @()
@@ -3305,6 +3531,17 @@ function Get-JvmReport {
         foreach ($m in [regex]::Matches($cl, '(?i)-agentlib:jdwp\S*')) { $flags += New-Finding 'high' 'jvm' 'Debug agent attached (jdwp)' $m.Value "PID $($p.ProcessId)" }
         foreach ($m in [regex]::Matches($cl, '(?i)-agentpath:("[^"]+"|\S+)')) { $flags += New-Finding 'high' 'jvm' 'Native agent loaded' (Hide-User $m.Groups[1].Value) "PID $($p.ProcessId)" }
         foreach ($m in [regex]::Matches($cl, '(?i)-Djava\.system\.class\.loader=(\S+)')) { $flags += New-Finding 'medium' 'jvm' 'Custom system class loader' $m.Groups[1].Value "PID $($p.ProcessId)" }
+        foreach ($m in [regex]::Matches($cl, '(?i)-Dfabric\.addMods=("[^"]+"|\S+)')) { $flags += New-Finding 'high' 'jvm' 'Mods are loaded from outside the mods folder (fabric.addMods)' (Hide-User $m.Groups[1].Value) "PID $($p.ProcessId)" }
+        $cpm = [regex]::Match($cl, '(?i)(?:^|\s)-(?:cp|classpath|-class-path)\s+("[^"]+"|\S+)')
+        if ($cpm.Success) {
+            foreach ($e in ($cpm.Groups[1].Value.Trim('"') -split ';')) {
+                if ($e -notmatch '(?i)\.jar$') { continue }
+                if ($e -match '(?i)[\\/](libraries|versions|runtime|natives|meta|bin|NewLaunch|launcher)[\\/]|authlib|lwjgl|LabyMod|\.lunarclient|\.feather|\.badlion|BadlionClient') { continue }
+                $cpSev = 'low'
+                if ($e -match '(?i)[\\/](Downloads|Desktop|Documents|Temp|ProgramData|Users[\\/]Public)[\\/]') { $cpSev = 'medium' }
+                $flags += New-Finding $cpSev 'jvm' 'A jar outside the usual library folders is on the game classpath' (Hide-User $e) "PID $($p.ProcessId)"
+            }
+        }
         $started = $null; try { $started = $p.CreationDate.ToUniversalTime() } catch {}
         if ($started -and (-not $script:JvmStartUtc -or $started -lt $script:JvmStartUtc)) { $script:JvmStartUtc = $started }
         $startedText = $null; if ($started) { $startedText = $started.ToString('o') }
@@ -4548,6 +4785,238 @@ function Show-Verdict($Summary, $Mods, $AiResults = @()) {
     }
 }
 
+$script:InstActivity = @{}
+
+function Get-GameDirOf([string]$Path) {
+    if ($Path -match '^(.*)\\mods(\\|$)') { return $Matches[1] }
+    return $null
+}
+
+function ConvertTo-IsoUtc($Value) {
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime().ToString('o') }
+    return $null
+}
+
+function Format-Stamp($Value) {
+    $t = ConvertTo-RunTime $Value
+    if (-not $t) { return 'unknown' }
+    return ('{0} ({1})' -f $t.ToLocalTime().ToString('yyyy-MM-dd HH:mm'), (Format-Ago $t))
+}
+
+function Get-InstanceActivity([string]$GameDir) {
+    if (-not $GameDir) { return $null }
+    $key = $GameDir.ToLower()
+    if ($script:InstActivity.ContainsKey($key)) { return $script:InstActivity[$key] }
+    $res = [pscustomobject]@{ LastPlayedUtc = $null; Users = @(); LogText = '' }
+    try {
+        $logDir = Join-Path $GameDir 'logs'
+        $files = @()
+        if (Test-Path -LiteralPath $logDir) {
+            $files = @(Get-ChildItem -LiteralPath $logDir -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)\.log(\.gz)?$' } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 12)
+        }
+        $latest = @($files | Where-Object { $_.Name -ieq 'latest.log' } | Select-Object -First 1)
+        if ($latest.Count -gt 0) {
+            $res.LastPlayedUtc = $latest[0].LastWriteTimeUtc
+            $txt = Read-TextFileSafe $latest[0].FullName 20971520
+            if ($txt) { $res.LogText = $txt }
+        } elseif ($files.Count -gt 0) {
+            $res.LastPlayedUtc = $files[0].LastWriteTimeUtc
+        }
+        $users = @{}
+        foreach ($f in $files) {
+            $txt = $null
+            if ($f.Name -ieq 'latest.log') { $txt = $res.LogText } else { $txt = Read-TextFileSafe $f.FullName 8388608 }
+            if (-not $txt) { continue }
+            foreach ($m in [regex]::Matches($txt, 'Setting user:\s*([A-Za-z0-9_]{1,16})')) {
+                $n = $m.Groups[1].Value
+                if (-not $users.ContainsKey($n) -or $f.LastWriteTimeUtc -gt $users[$n]) { $users[$n] = $f.LastWriteTimeUtc }
+            }
+        }
+        $res.Users = @($users.Keys | ForEach-Object { [pscustomobject]@{ Name = $_; LastSeenUtc = $users[$_] } } | Sort-Object LastSeenUtc -Descending | Select-Object -First 12)
+    } catch {}
+    $script:InstActivity[$key] = $res
+    return $res
+}
+
+function Test-ModLoaded($Act, $Mod) {
+    if (-not $Act -or -not $Act.LogText) { return $null }
+    $names = New-Object System.Collections.Generic.List[string]
+    if ($Mod.ModId -and ([string]$Mod.ModId).Length -ge 4) { $names.Add([string]$Mod.ModId) }
+    $stem = [IO.Path]::GetFileNameWithoutExtension(([string]$Mod.File -replace '(?i)\.(disabled|old|bak|duplicate|backup|off)$', ''))
+    if ($stem.Length -ge 4) { $names.Add($stem) }
+    foreach ($n in $names) {
+        if ([regex]::IsMatch($Act.LogText, '(?i)(?<![A-Za-z0-9_])' + [regex]::Escape($n) + '(?![A-Za-z0-9_])')) { return $true }
+    }
+    return $false
+}
+
+function Get-InstanceGroups($Mods) {
+    $groups = [ordered]@{}
+    $newGroup = {
+        param($Text)
+        [pscustomobject]@{ Text = $Text; Launcher = ''; Instance = ''; Running = $false; RunInfo = $null; GameDir = $null; Activity = $null; Mods = 0; Flagged = 0; Inactive = 0
+            Hacks = (New-Object System.Collections.Generic.List[string]); FlaggedMods = (New-Object System.Collections.Generic.List[object]) }
+    }
+    foreach ($m in $Mods) {
+        if (-not $m.LocalPath) { continue }
+        $folder = Split-Path -Parent $m.LocalPath
+        $lab = Get-FolderLabel $folder $script:Instances
+        $key = $lab.Text
+        if (-not $groups.Contains($key)) {
+            $g = & $newGroup $key
+            if ($lab.Instance) { $g.Launcher = $lab.Instance.Launcher; $g.Instance = $lab.Instance.Instance; $g.RunInfo = $lab.Instance; $g.GameDir = $lab.Instance.GameDir }
+            else { $li = Get-LauncherInfo $folder; $g.Launcher = $li.Launcher; $g.Instance = $li.Instance }
+            if (-not $g.GameDir) { $g.GameDir = Get-GameDirOf $m.LocalPath }
+            $groups[$key] = $g
+        }
+        $g = $groups[$key]
+        if ($lab.Running) { $g.Running = $true }
+        $g.Mods++
+        if ((Get-ModClass $m) -notin 'MALWARE', 'CHEAT', 'SUSPICIOUS') { continue }
+        if ([string]$m.File -match '(?i)\.(disabled|old|bak|duplicate|backup|off)$') { $g.Inactive++; continue }
+        $g.Flagged++
+        $names = New-Object System.Collections.Generic.List[string]
+        foreach ($h in @($m.Hacks)) {
+            if ($h -and $h.Strength -ne 'weak' -and $h.Kind -ne 'Keybind') {
+                [void]$names.Add([string]$h.Name)
+                if (-not $g.Hacks.Contains([string]$h.Name)) { [void]$g.Hacks.Add([string]$h.Name) }
+            }
+        }
+        [void]$g.FlaggedMods.Add([pscustomobject]@{ Mod = $m; Hacks = $names.ToArray() })
+    }
+    foreach ($i in @($script:Instances | Where-Object { $_ })) {
+        $txt = '{0} / {1}' -f $i.Launcher, $i.Instance
+        if (-not $groups.Contains($txt)) {
+            $g = & $newGroup $txt
+            $g.Launcher = $i.Launcher; $g.Instance = $i.Instance; $g.GameDir = $i.GameDir
+            $groups[$txt] = $g
+        }
+        $groups[$txt].Running = $true
+        $groups[$txt].RunInfo = $i
+    }
+    foreach ($g in $groups.Values) { $g.Activity = Get-InstanceActivity $g.GameDir }
+    return @($groups.Values | Sort-Object @{ Expression = { if ($_.Running) { 0 } else { 1 } } }, @{ Expression = { -[int]$_.Flagged } }, Text)
+}
+
+function Get-TimelineEvents($Groups) {
+    $ev = New-Object System.Collections.Generic.List[object]
+    $add = {
+        param($Time, $Kind, $What, $Where, $Source)
+        [void]$ev.Add([pscustomobject]@{ Time = $Time; Kind = $Kind; What = $What; Where = $Where; Source = $Source })
+    }
+    foreach ($g in @($Groups)) {
+        foreach ($fm in $g.FlaggedMods) {
+            $m = $fm.Mod
+            $c = ConvertTo-RunTime $m.CreatedUtc
+            $w = ConvertTo-RunTime $m.ModifiedUtc
+            if ($c) { & $add $c 'downloaded' ('{0} was added to the mods folder' -f $m.File) $g.Text 'file creation time' }
+            if ($w -and $c -and [math]::Abs(($w - $c).TotalMinutes) -gt 2) { & $add $w 'modified' ('{0} was last changed' -f $m.File) $g.Text 'file write time' }
+            if ((Test-ModLoaded $g.Activity $m) -eq $true -and $g.Activity.LastPlayedUtc) { & $add $g.Activity.LastPlayedUtc 'last used' ('{0} was loaded in the last game session' -f $m.File) $g.Text 'latest.log' }
+        }
+    }
+    foreach ($s in @($script:Sys)) {
+        if ($s.Category -notin 'deleted', 'browser-download', 'mod-dev-deleted') { continue }
+        $txt = [string]$s.Rule + ' ' + [string]$s.Detail
+        if ($s.Severity -eq 'low' -and $txt -notmatch '(?i)\.jar|mod') { continue }
+        $kind = 'deleted'
+        if ($s.Category -eq 'browser-download') { $kind = 'downloaded' }
+        & $add (ConvertTo-RunTime $s.Time) $kind ([string]$s.Rule + ': ' + [string]$s.Detail) '' ([string]$s.Source)
+    }
+    $dated = @($ev | Where-Object { $_.Time } | Sort-Object Time -Descending)
+    $undated = @($ev | Where-Object { -not $_.Time })
+    return @($dated + $undated | Select-Object -First 40)
+}
+
+function ConvertTo-InstanceMeta($Groups) {
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($g in @($Groups | Select-Object -First 12)) {
+        $act = $g.Activity
+        $ri = $g.RunInfo
+        $users = @()
+        if ($act) { $users = @($act.Users | ForEach-Object { [ordered]@{ name = $_.Name; lastSeenUtc = (ConvertTo-IsoUtc $_.LastSeenUtc) } }) }
+        $fl = @($g.FlaggedMods | Select-Object -First 15 | ForEach-Object {
+            $m = $_.Mod
+            [ordered]@{
+                file = [string]$m.File; verdict = (Limit-Text ([string]$m.Verdict) 60); hacks = @($_.Hacks | Select-Object -First 8)
+                createdUtc = [string]$m.CreatedUtc; modifiedUtc = [string]$m.ModifiedUtc; loadedLastSession = (Test-ModLoaded $act $m); source = (Limit-Text ([string]$m.Source) 100)
+            }
+        })
+        $ver = ''; $loader = ''
+        if ($ri) { $ver = [string]$ri.Version; $loader = [string]$ri.Loader }
+        $lp = $null
+        if ($act) { $lp = ConvertTo-IsoUtc $act.LastPlayedUtc }
+        [void]$out.Add([ordered]@{
+            launcher = $g.Launcher; instance = $g.Instance; running = [bool]$g.Running; version = $ver; loader = $loader
+            gameDir = (Hide-User ([string]$g.GameDir)); lastPlayedUtc = $lp
+            modCount = $g.Mods; flaggedCount = $g.Flagged; users = $users; flagged = $fl
+        })
+    }
+    return $out.ToArray()
+}
+
+function ConvertTo-TimelineMeta($Events) {
+    return @(@($Events) | Select-Object -First 40 | ForEach-Object {
+        [ordered]@{ time = (ConvertTo-IsoUtc $_.Time); kind = [string]$_.Kind; what = (Limit-Text ([string]$_.What) 200); where = (Limit-Text (Hide-User ([string]$_.Where)) 160); source = [string]$_.Source }
+    })
+}
+
+function Show-InstanceSummary($Groups) {
+    Write-Section 'INSTANCES'
+    $running = @($script:Instances | Where-Object { $_ })
+    if ($running.Count -eq 0) { Write-Host '  Currently running: nothing (Minecraft was not open during this scan)' -ForegroundColor DarkGray }
+    foreach ($i in $running) {
+        $ver = (('{0} {1}' -f $i.Loader, $i.Version).Trim())
+        Write-Host ('  Currently running: {0} / {1}   PID {2}   account {3}   {4}' -f $i.Launcher, $i.Instance, $i.Pid, $i.Username, $ver) -ForegroundColor Green
+    }
+    $rows = @($Groups)
+    Write-Host ('  Instances found: {0}   with hacks: {1}' -f $rows.Count, @($rows | Where-Object { $_.Flagged -gt 0 }).Count) -ForegroundColor Cyan
+    if ($rows.Count -eq 0) { Write-Host '  No instances found.' -ForegroundColor DarkGray; return }
+    Write-Host ''
+    foreach ($g in $rows) {
+        $tag = 'not running'
+        $tcol = 'DarkGray'
+        if ($g.Running) { $tag = 'RUNNING NOW'; $tcol = 'Green' }
+        Write-Host ('  {0}   [{1}]' -f $g.Text, $tag) -ForegroundColor $tcol
+        if ($g.Activity -and $g.Activity.LastPlayedUtc) { Write-Host ('      last played: {0}' -f (Format-Stamp $g.Activity.LastPlayedUtc)) -ForegroundColor Gray }
+        if ($g.Flagged -gt 0) {
+            $hn = ''
+            if ($g.Hacks.Count -gt 0) { $hn = '  hacks: ' + ((@($g.Hacks | Select-Object -First 8)) -join ', ') }
+            Write-Host ('      HAS HACKS / FLAGGED MODS: {0} of {1} mod(s){2}' -f $g.Flagged, $g.Mods, $hn) -ForegroundColor Red
+            if ($g.Running) { Write-Host '      >> the hacks are in the instance that is running right now' -ForegroundColor Red }
+            foreach ($fm in @($g.FlaggedMods | Select-Object -First 6)) {
+                $m = $fm.Mod
+                $hk = ''
+                if (@($fm.Hacks).Count -gt 0) { $hk = '   hacks: ' + ((@($fm.Hacks | Select-Object -First 5)) -join ', ') }
+                Write-Host ('      - {0}{1}' -f $m.File, $hk) -ForegroundColor White
+                Write-Host ('          added/downloaded: {0}   last changed: {1}' -f (Format-Stamp $m.CreatedUtc), (Format-Stamp $m.ModifiedUtc)) -ForegroundColor DarkGray
+                $loaded = Test-ModLoaded $g.Activity $m
+                if ($loaded -eq $true) { Write-Host ('          last used: it was loaded in the last game session ({0})' -f (Format-Stamp $g.Activity.LastPlayedUtc)) -ForegroundColor Yellow }
+                elseif ($loaded -eq $false) { Write-Host '          last used: not loaded in the last game session (the instance was played without it, or it is older)' -ForegroundColor DarkGray }
+                else { Write-Host '          last used: no game log found for this instance' -ForegroundColor DarkGray }
+            }
+        } else {
+            $extra = ''
+            if ($g.Inactive -gt 0) { $extra = ', {0} flagged inactive copy(ies)' -f $g.Inactive }
+            Write-Host ('      clean: no flagged mods ({0} checked{1})' -f $g.Mods, $extra) -ForegroundColor Green
+        }
+    }
+}
+
+function Show-Timeline($Groups) {
+    Write-Section 'ACTIVITY TIMELINE  (flagged mods, downloads, deletions)'
+    if (-not $script:IsAdmin) { Write-Host '  Run PowerShell as Administrator to include deleted-file history (Recycle Bin, NTFS journal) and Prefetch.' -ForegroundColor Yellow }
+    $events = @(Get-TimelineEvents $Groups)
+    if ($events.Count -eq 0) { Write-Host '  No download, deletion or usage events found for flagged mods.' -ForegroundColor DarkGray; return }
+    foreach ($e in ($events | Select-Object -First 20)) {
+        $when = 'time unknown     '
+        if ($e.Time) { $when = $e.Time.ToLocalTime().ToString('yyyy-MM-dd HH:mm') + '  ' }
+        $col = 'Gray'
+        if ($e.Kind -eq 'deleted') { $col = 'Yellow' } elseif ($e.Kind -eq 'last used') { $col = 'Red' } elseif ($e.Kind -eq 'downloaded') { $col = 'Cyan' }
+        Write-Host ('  {0}{1,-11} {2}' -f $when, $e.Kind, (Limit-Text (Hide-User $e.What) 110)) -ForegroundColor $col
+        if ($e.Where) { Write-Host ('                        in {0}' -f $e.Where) -ForegroundColor DarkGray }
+    }
+}
+
 function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
     $v = $Summary.verdict
     $vc = switch ($v) { 'NO FINDINGS' { 'Green' } 'MINOR NOTES' { 'Green' } 'REVIEW' { 'Yellow' } default { 'Red' } }
@@ -4571,6 +5040,10 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
         Write-Host '   Minecraft was not running during this scan.' -ForegroundColor DarkGray
     }
     if (-not $ModsOnly) { Write-Host '   (system forensics are not shown here - the full details are in the JSON report)' -ForegroundColor DarkGray }
+
+    $instGroups = @(Get-InstanceGroups $Mods)
+    Show-InstanceSummary $instGroups
+    Show-Timeline $instGroups
 
     Write-Section ('MODS  ({0} jar/file(s) checked)' -f @($Mods).Count)
     $flagged = @($Mods | Where-Object { (Get-ModClass $_) -in 'MALWARE', 'CHEAT', 'SUSPICIOUS' } | Sort-Object { -[int]$_.Score })
@@ -4904,6 +5377,15 @@ function Invoke-Main {
     $jars = @($uniq | Where-Object { $_.Extension.ToLower() -in $jarExt -or $_.Name -match '(?i)\.jar\.' } | Select-Object -First 1500)
     $jarSet = @{}; foreach ($j in $jars) { $jarSet[$j.FullName] = $true }
     $others = @($uniq | Where-Object { -not $jarSet.ContainsKey($_.FullName) -and $_.Length -gt 0 })
+    $strayMap = @{}
+    if (-not $ModsOnly) {
+        $script:StrayJars = @()
+        Invoke-Module 'Mod jars outside the mods folders' { $script:StrayJars = @(Find-StrayModJars $jarSet) }
+        foreach ($sj in @($script:StrayJars)) {
+            if (-not $jarSet.ContainsKey($sj.FullName)) { $jars += $sj; $jarSet[$sj.FullName] = $true; $strayMap[$sj.FullName] = $true }
+        }
+        if ($strayMap.Count -gt 0) { Write-Line ('  {0} mod jar(s) found outside the mods folders (Downloads, Desktop, Temp, game folder)' -f $strayMap.Count) Yellow }
+    }
     Write-Line ('  {0} jar file(s), {1} other file(s)' -f $jars.Count, $others.Count) Gray
 
     $hashes = @{}
@@ -4924,6 +5406,9 @@ function Invoke-Main {
         Write-Host ("`r  scanning {0}/{1}  {2}" -f $i, $jars.Count, (Limit-Text $j.Name 50).PadRight(50)) -NoNewline -ForegroundColor DarkGray
         try {
             $r = Invoke-JarScan $j $hashes[$j.FullName] $modrinth
+            if ($r -and $strayMap.ContainsKey($j.FullName)) {
+                $r.Findings = @($r.Findings) + [pscustomobject]@{ Severity = 'low'; Category = 'location'; Rule = 'Mod jar found outside the mods folders (loaded another way, or left behind)'; Detail = (Hide-User $j.DirectoryName); Where = $j.Name }
+            }
             if ($r) { [void]$mods.Add($r) }
         } catch {
             [void]$mods.Add([pscustomobject]@{ File = $j.Name; LocalPath = $j.FullName; Folder = (Hide-User $j.DirectoryName); SizeKB = [math]::Round($j.Length / 1KB); Sha1 = $null; Sha256 = $null; ModId = $null; ModName = $null; ModVersion = $null; Loader = $null; Modrinth = $null; Source = $null; SourceTrust = 'unknown'; ModifiedUtc = $j.LastWriteTimeUtc.ToString('o'); Classes = 0; NestedJars = 0; DeepScanned = $false; Score = 0; Verdict = 'UNKNOWN'; Hacks = @(); Findings = @([pscustomobject]@{ Severity = 'low'; Category = 'scan-error'; Rule = 'Could not scan this file'; Detail = (Limit-Text $_.Exception.Message 120); Where = $j.Name }) })
@@ -5002,6 +5487,9 @@ function Invoke-Main {
     $pcId = $null; if ($guid) { $pcId = (Get-Sha256Hex ('CactusHacksDetector:' + $guid)).Substring(0, 16) }
     $osName = $null; $osBuild = $null; if ($os) { $osName = [string]$os.Caption; $osBuild = [string]$os.BuildNumber }
     $accounts = if ($script:Accounts) { $script:Accounts } else { Get-MinecraftAccountProfiles }
+    $instGroupsMeta = @(Get-InstanceGroups $modsArr)
+    $instMeta = @(ConvertTo-InstanceMeta $instGroupsMeta)
+    $tlMeta = @(ConvertTo-TimelineMeta (Get-TimelineEvents $instGroupsMeta))
     $tgt = $null
     if ($script:TargetInstance) {
         $ti = $script:TargetInstance
@@ -5016,6 +5504,9 @@ function Invoke-Main {
         modFolders = $folders.Count; jarCount = $jars.Count; bootUtc = $boot; gameRunning = (@($jvm).Count -gt 0)
         minecraftAccounts = $accounts
         scanTarget = $tgt
+        instances = $instMeta
+        timeline = $tlMeta
+        deepTimeline = ($script:IsAdmin -and -not $ModsOnly)
         usernameCheck = $script:UsernameCheck
         previousScanUtc = $prevUtc
         durationSec = [math]::Round($sw.Elapsed.TotalSeconds)
