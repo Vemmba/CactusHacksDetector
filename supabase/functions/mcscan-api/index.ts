@@ -140,14 +140,13 @@ const store: Store = {
   async deleteScan(id) {
 
     const files = await db.from('mod_files').select('storage_path').eq('scan_id', id).is('deleted_at', null);
-    if (files.error) throw new Error(files.error.message);
-    const paths = (files.data ?? []).map((f: any) => f.storage_path).filter(Boolean) as string[];
+    const paths = ((files.error ? [] : files.data) ?? []).map((f: any) => f.storage_path).filter(Boolean) as string[];
     if (paths.length) {
-      const rem = await db.storage.from(MOD_BUCKET).remove(paths);
-      if (rem.error) throw new Error(rem.error.message);
+      try { await db.storage.from(MOD_BUCKET).remove(paths); } catch (e) { console.log('scan delete: storage cleanup failed: ' + (e as Error).message); }
     }
     const r = await db.from('scans').delete().eq('id', id).select('id');
-    return !r.error && (r.data?.length ?? 0) > 0;
+    if (r.error) throw new Error('delete failed: ' + r.error.message);
+    return (r.data?.length ?? 0) > 0;
   },
   async listHacks(limit) {
     return must(await db.from('v_hacks').select('*').limit(limit)) ?? [];
