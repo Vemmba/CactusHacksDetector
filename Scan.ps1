@@ -13,7 +13,7 @@ param(
     [switch]$ModsOnly,
     [switch]$ScanVerified,
     [switch]$SkipVerified,
-    [int]$VerifiedSeconds = 120,
+    [int]$VerifiedSeconds = 45,
     [switch]$JsonOnlyIfFlagged,
     [switch]$IncludeAccountProfiles,
     [switch]$Yes,
@@ -3556,19 +3556,51 @@ function Scan-GameLogs([string]$GameDir, $KnownModIds) {
         if (-not $t) { continue }
         $hits = @{}; $modHits = @{}; $inList = $false
         $isLatest = ($lf -like '*latest.log')
-        foreach ($line in ($t -split "`r?`n")) {
-            if ($line -match '\[CHAT\]') { continue }
-            if ($isLatest) {
-                if ($line -match 'Loading \d+ mods?:') { $inList = $true; continue }
-                if ($inList) {
-                    if ($line.StartsWith('[')) { $inList = $false }
-                    elseif ($line -match '^\s+-\s+(\S+)\s+(\S+)') { $loaded[$Matches[1].ToLower()] = $Matches[2]; continue }
+        if ($isLatest) {
+            $lm = [regex]::Match($t, 'Loading \d+ mods?:')
+            if ($lm.Success) {
+                $nl = $t.IndexOf([char]10, $lm.Index)
+                if ($nl -ge 0) {
+                    $pos = $nl + 1
+                    $cnt = 0
+                    while ($pos -lt $t.Length -and $cnt -lt 5000) {
+                        $e = $t.IndexOf([char]10, $pos)
+                        if ($e -lt 0) { $e = $t.Length }
+                        $ln = $t.Substring($pos, $e - $pos).TrimEnd([char]13)
+                        if ($ln.StartsWith('[')) { break }
+                        if ($ln -match '^\s+-\s+(\S+)\s+(\S+)') { $loaded[$Matches[1].ToLower()] = $Matches[2] }
+                        $pos = $e + 1
+                        $cnt++
+                    }
                 }
             }
-            $m = $Rx.Clients.Match($line)
-            if ($m.Success -and $hits.Count -lt 4 -and -not $hits.ContainsKey($m.Value.ToLower())) { $hits[$m.Value.ToLower()] = (Limit-Text $line 140) }
-            $mm = $Rx.Modules.Match($line)
-            if ($mm.Success) { $modHits[$mm.Value.ToLower()] = $true }
+        }
+        $guard = 0
+        $cm = $Rx.Clients.Match($t)
+        while ($cm.Success -and $guard -lt 3000 -and $hits.Count -lt 4) {
+            $guard++
+            $hk = $cm.Value.ToLower()
+            if (-not $hits.ContainsKey($hk)) {
+                $ls = $t.LastIndexOf([char]10, $cm.Index) + 1
+                $le = $t.IndexOf([char]10, $cm.Index)
+                if ($le -lt 0) { $le = $t.Length }
+                $ln = $t.Substring($ls, $le - $ls)
+                if ($ln.IndexOf('[CHAT]', [StringComparison]::Ordinal) -lt 0) { $hits[$hk] = (Limit-Text $ln.TrimEnd([char]13) 140) }
+            }
+            $cm = $cm.NextMatch()
+        }
+        $guard = 0
+        $mm = $Rx.Modules.Match($t)
+        while ($mm.Success -and $guard -lt 3000 -and $modHits.Count -lt 40) {
+            $guard++
+            $mk = $mm.Value.ToLower()
+            if (-not $modHits.ContainsKey($mk)) {
+                $ls = $t.LastIndexOf([char]10, $mm.Index) + 1
+                $le = $t.IndexOf([char]10, $mm.Index)
+                if ($le -lt 0) { $le = $t.Length }
+                if ($t.IndexOf('[CHAT]', $ls, $le - $ls, [StringComparison]::Ordinal) -lt 0) { $modHits[$mk] = $true }
+            }
+            $mm = $mm.NextMatch()
         }
         $fi = Get-Item -LiteralPath $lf -ErrorAction SilentlyContinue
         $ft = $null; if ($fi) { $ft = $fi.LastWriteTimeUtc }
@@ -5163,34 +5195,50 @@ function Get-InstanceGroups($Mods) {
     return @($groups.Values | Sort-Object @{ Expression = { if ($_.Running) { 0 } else { 1 } } }, @{ Expression = { -[int]$_.Flagged } }, Text)
 }
 
+function Add-TimelineEvent($List, $Time, [string]$Kind, [string]$What, [string]$Where, [string]$Source) {
+    [long]$tk = 0
+    if ($Time) { $tk = [long]$Time.Ticks }
+    [void]$List.Add([pscustomobject]@{ Time = $Time; Ticks = $tk; Kind = $Kind; What = $What; Where = $Where; Source = $Source })
+}
+
 function Get-TimelineEvents($Groups) {
     $ev = New-Object System.Collections.Generic.List[object]
-    $add = {
-        param($Time, $Kind, $What, $Where, $Source)
-        $tm = ConvertTo-RunTime $Time
-        [void]$ev.Add([pscustomobject]@{ Time = $tm; Kind = $Kind; What = $What; Where = $Where; Source = $Source })
-    }
     foreach ($g in @($Groups)) {
-        foreach ($fm in $g.FlaggedMods) {
-            $m = $fm.Mod
-            $c = ConvertTo-RunTime $m.CreatedUtc
-            $w = ConvertTo-RunTime $m.ModifiedUtc
-            if ($c) { & $add $c 'downloaded' ('{0} was added to the mods folder' -f $m.File) $g.Text 'file creation time' }
-            if ($w -and $c -and [math]::Abs(($w - $c).TotalMinutes) -gt 2) { & $add $w 'modified' ('{0} was last changed' -f $m.File) $g.Text 'file write time' }
-            if ((Test-ModLoaded $g.Activity $m) -eq $true -and $g.Activity.LastPlayedUtc) { & $add $g.Activity.LastPlayedUtc 'last used' ('{0} was loaded in the last game session' -f $m.File) $g.Text 'latest.log' }
+        if (-not $g) { continue }
+        foreach ($fm in @($g.FlaggedMods)) {
+            try {
+                $m = $fm.Mod
+                $c = ConvertTo-RunTime $m.CreatedUtc
+                $w = ConvertTo-RunTime $m.ModifiedUtc
+                if ($c) { Add-TimelineEvent $ev $c 'downloaded' ('{0} was added to the mods folder' -f $m.File) ([string]$g.Text) 'file creation time' }
+                if ($c -and $w) {
+                    [double]$gap = [math]::Abs([double]($w.Ticks - $c.Ticks)) / 600000000.0
+                    if ($gap -gt 2) { Add-TimelineEvent $ev $w 'modified' ('{0} was last changed' -f $m.File) ([string]$g.Text) 'file write time' }
+                }
+                $lp = $null
+                if ($g.Activity) { $lp = ConvertTo-RunTime $g.Activity.LastPlayedUtc }
+                if ($lp -and ((Test-ModLoaded $g.Activity $m) -eq $true)) { Add-TimelineEvent $ev $lp 'last used' ('{0} was loaded in the last game session' -f $m.File) ([string]$g.Text) 'latest.log' }
+            } catch {}
         }
     }
     foreach ($s in @($script:Sys)) {
-        if ($s.Category -notin 'deleted', 'browser-download', 'mod-dev-deleted') { continue }
-        $txt = [string]$s.Rule + ' ' + [string]$s.Detail
-        if ($s.Severity -eq 'low' -and $txt -notmatch '(?i)\.jar|mod') { continue }
-        $kind = 'deleted'
-        if ($s.Category -eq 'browser-download') { $kind = 'downloaded' }
-        & $add (ConvertTo-RunTime $s.Time) $kind ([string]$s.Rule + ': ' + [string]$s.Detail) '' ([string]$s.Source)
+        try {
+            if (-not $s) { continue }
+            $cat = [string]$s.Category
+            if ($cat -ne 'deleted' -and $cat -ne 'browser-download' -and $cat -ne 'mod-dev-deleted') { continue }
+            $txt = [string]$s.Rule + ' ' + [string]$s.Detail
+            if ([string]$s.Severity -eq 'low' -and $txt -notmatch '(?i)\.jar|mod') { continue }
+            $kind = 'deleted'
+            if ($cat -eq 'browser-download') { $kind = 'downloaded' }
+            Add-TimelineEvent $ev (ConvertTo-RunTime $s.Time) $kind ([string]$s.Rule + ': ' + [string]$s.Detail) '' ([string]$s.Source)
+        } catch {}
     }
-    $dated = @($ev | Where-Object { $_.Time } | Sort-Object { ([datetime]$_.Time).Ticks } -Descending)
+    $dated = @($ev | Where-Object { $_.Time } | Sort-Object -Property Ticks -Descending)
     $undated = @($ev | Where-Object { -not $_.Time })
-    return @($dated + $undated | Select-Object -First 40)
+    $all = New-Object System.Collections.Generic.List[object]
+    foreach ($x in $dated) { [void]$all.Add($x) }
+    foreach ($x in $undated) { [void]$all.Add($x) }
+    return @($all | Select-Object -First 40)
 }
 
 function ConvertTo-InstanceMeta($Groups) {
@@ -5371,18 +5419,33 @@ function Show-Report($Summary, $Mods, $Jvm, $AiResults = @()) {
         if ($rowsShown -gt 5) { Write-Host ('     ... and {0} more module(s) in the JSON' -f ($rowsShown - 5)) -ForegroundColor DarkGray }
     }
 
-    if (-not $ModsOnly) {
-        $sysShow = @(@($script:Sys) | Where-Object { $_.Severity -in 'high', 'medium' } | Sort-Object { -(Get-SevRank $_.Severity) }, { $t = ConvertTo-RunTime $_.Time; if ($t) { -$t.Ticks } else { 0 } } | Select-Object -First 25)
-        Write-Section ('SYSTEM DETECTIONS  ({0} high/medium, newest first)' -f @(@($script:Sys) | Where-Object { $_.Severity -in 'high', 'medium' }).Count)
+    if (-not $ModsOnly) { try {
+        $sysRows = New-Object System.Collections.Generic.List[object]
+        foreach ($sf in @($script:Sys)) {
+            try {
+                if (-not $sf) { continue }
+                $sv = [string]$sf.Severity
+                if ($sv -ne 'high' -and $sv -ne 'medium') { continue }
+                [long]$tk = 0
+                $st = ConvertTo-RunTime $sf.Time
+                if ($st) { $tk = [long]$st.Ticks }
+                [int]$rk = 2
+                if ($sv -eq 'high') { $rk = 3 }
+                [void]$sysRows.Add([pscustomobject]@{ Item = $sf; Rank = $rk; Ticks = $tk })
+            } catch {}
+        }
+        $sysShow = @($sysRows | Sort-Object -Property Rank, Ticks -Descending | Select-Object -First 25)
+        Write-Section ('SYSTEM DETECTIONS  ({0} high/medium, newest first)' -f $sysRows.Count)
         if ($sysShow.Count -eq 0) { Write-Line '  Nothing high or medium on this PC.' Green }
-        foreach ($f in $sysShow) {
+        foreach ($row in $sysShow) {
+            $f = $row.Item
             $tt = ConvertTo-RunTime $f.Time
             $when = 'time unknown'; if ($tt) { $when = Format-Stamp $tt }
             Write-Host ('  [{0,-6}] {1}' -f $f.Severity.ToUpper(), (Limit-Text $f.Rule 100)) -ForegroundColor (Get-SevColor $f.Severity)
             if ($f.Detail) { Write-Host ('           ' + (Limit-Text $f.Detail 130)) -ForegroundColor Gray }
             Write-Host ('           when: {0}   source: {1}' -f $when, (Limit-Text ([string]$f.Source) 60)) -ForegroundColor DarkGray
         }
-    }
+    } catch { Write-Host '  (system detections could not be listed on this PC)' -ForegroundColor DarkGray } }
 
     if (@($Jvm).Count -gt 0) { Write-Section 'RUNNING GAME (JVM)' }
     foreach ($j in $Jvm) {
