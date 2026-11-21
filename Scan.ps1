@@ -13,7 +13,7 @@ param(
     [switch]$ModsOnly,
     [switch]$ScanVerified,
     [switch]$SkipVerified,
-    [int]$VerifiedSeconds = 45,
+    [int]$VerifiedSeconds = 200,
     [switch]$JsonOnlyIfFlagged,
     [switch]$IncludeAccountProfiles,
     [switch]$Yes,
@@ -1849,7 +1849,6 @@ $SuspectMods = [ordered]@{
     'floursvarioustweaks' = 'Flour''s Various Tweaks'
     'fluidlogged' = 'Fluidlogged'
     'easyplace' = 'Easy Place'
-    'freecam' = 'Freecam'
     'camerautils' = 'Camera Utils'
     'betterthirdperson' = 'Better Third Person'
     'shouldersurfingreloaded' = 'Shoulder Surfing Reloaded'
@@ -1877,10 +1876,6 @@ $SuspectMods = [ordered]@{
     'cpsdisplay' = 'CPS Counter'
     'keystrokes' = 'Keystrokes'
     'bettercombat' = 'Better Combat'
-    'xaerosminimap' = 'Xaero''s Minimap'
-    'xaerominimap' = 'Xaero''s Minimap'
-    'xaerosworldmap' = 'Xaero''s World Map'
-    'xaeroworldmap' = 'Xaero''s World Map'
     'journeymap' = 'JourneyMap'
     'voxelmap' = 'VoxelMap'
     'inventoryprofilesnext' = 'Inventory Profiles Next'
@@ -1897,7 +1892,6 @@ $SuspectMods = [ordered]@{
     'invmove' = 'InvMove'
     'betterscreens' = 'Better Screens'
     'fullbright' = 'Fullbright'
-    'gammautils' = 'Gamma Utils'
     'nightvision' = 'Night Vision'
     'lightoverlay' = 'Light Overlay'
     'viafabric' = 'ViaFabric'
@@ -1910,7 +1904,6 @@ $SuspectMods = [ordered]@{
     'pingequalizer' = 'Ping Equalizer'
     'omniscience' = 'Omniscience'
     'autofish' = 'Auto Fish'
-    'togglesprint' = 'Toggle Sprint'
     'togglesneak' = 'Toggle Sneak'
     'autosprint' = 'Auto Sprint'
     'autowalk' = 'Auto Walk'
@@ -1934,8 +1927,6 @@ $SuspectMods = [ordered]@{
     'targethud' = 'Target HUD'
     'enemyhealthbar' = 'Enemy Health Bar'
     'healthbars' = 'Health Bars'
-    'potioncounter' = 'Potion Counter'
-    'potcounter' = 'Potion Counter'
     'itemcounter' = 'Item Counter'
     'cooldownindicator' = 'Cooldown Indicator'
     'attackindicator' = 'Attack Indicator'
@@ -1963,7 +1954,6 @@ $SuspectMods = [ordered]@{
     'scaffoldingplace' = 'Scaffolding Place'
     'bridgehelper' = 'Bridge Helper'
     'bridgeassist' = 'Bridge Assist'
-    'togglesprinting' = 'Toggle Sprint'
     'sprintmod' = 'Sprint Mod'
     'sneakmod' = 'Sneak Mod'
     'autojump' = 'Auto Jump'
@@ -3912,8 +3902,19 @@ function Invoke-EventLogChecks {
         foreach ($pr in @($mp.ExclusionProcess)) { if ($pr -and $pr -notmatch '^N/A') { Add-Sys 'medium' 'defender' 'Defender exclusion for a process' $pr $null 'Get-MpPreference' } }
     } catch {}
 
-    foreach ($e in (Get-EventsSafe @{ LogName = 'Microsoft-Windows-PowerShell/Operational'; Id = 4104; StartTime = $script:WindowStart.ToLocalTime() } 300)) {
-        Test-CommandLine (Limit-Text ([string]$e.Message) 3000) 'PowerShell script-block log' $e.TimeCreated
+    $sbEvents = @(Get-EventsSafe @{ LogName = 'Microsoft-Windows-PowerShell/Operational'; Id = 4104; StartTime = $script:WindowStart.ToLocalTime() } 300)
+    $ownBlocks = @{}
+    foreach ($e in $sbEvents) {
+        $mt = [string]$e.Message
+        if ($e.ProcessId -eq $PID -or $mt -match '(?i)CactusHacksDetect[or]r|mcscan-api|ProfileBuilder|Invoke-Module|Write-Section') {
+            if ($mt -match 'ScriptBlock ID:\s*([0-9a-fA-F-]{36})') { $ownBlocks[$Matches[1].ToLower()] = $true }
+        }
+    }
+    foreach ($e in $sbEvents) {
+        $mt = [string]$e.Message
+        if ($e.ProcessId -eq $PID) { continue }
+        if ($mt -match 'ScriptBlock ID:\s*([0-9a-fA-F-]{36})' -and $ownBlocks.ContainsKey($Matches[1].ToLower())) { continue }
+        Test-CommandLine (Limit-Text $mt 3000) 'PowerShell script-block log' $e.TimeCreated
     }
     foreach ($e in (Get-EventsSafe @{ LogName = 'Security'; Id = 4688; StartTime = $script:WindowStart.ToLocalTime() } 1500)) {
         $m = [string]$e.Message; $np = ''; $cl = ''
@@ -4703,8 +4704,7 @@ $script:SuspectTrollMessages = @(
     'NUB: Something smells fishy... We see those reach circle / weird tweaks, nub',
     'NUB: Not fully caught yet, but your client is looking questionable [?]',
     'NUB: Bro is walking a very fine line between ''good gaming chair'' and ''banned''',
-    'NUB: Suspicious modifications detected. The staff team is watching you, nub',
-    'NUB: Nub alert -- slight reach / combat assist detected. Replay will be checked.'
+    'NUB: Suspicious modifications detected. The staff team is watching you, nub'
 )
 
 function Get-TrollMessage([string]$Category, [string[]]$Hacks, [object]$AiCheatResult) {
