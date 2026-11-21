@@ -2692,6 +2692,12 @@ function Invoke-JarScan([IO.FileInfo]$File, $Hashes, $Modrinth) {
     }
     if ($src.Trust -eq 'risky') { $findings.Add((New-Finding 'medium' 'source' 'Downloaded from a risky source' $src.Url $File.Name)) }
     if ($err) { $findings.Add((New-Finding 'low' 'error' 'Could not open as zip/jar (corrupt or not a jar)' (Limit-Text $err 100) $File.Name)) }
+    if (($File.Attributes -band [IO.FileAttributes]::Hidden) -or ($File.Attributes -band [IO.FileAttributes]::System)) {
+        $hsev = 'high'
+        if ($verified) { $hsev = 'medium' }
+        $findings.Add((New-Finding $hsev 'bypass' 'Mod file is hidden with the Hidden/System attribute (not visible in Explorer)' $File.Name $File.Name))
+    }
+    if ($File.LastWriteTimeUtc -gt $script:NowUtc.AddDays(2)) { $findings.Add((New-Finding 'medium' 'bypass' 'File timestamp is in the future (timestamps may have been altered)' ($File.LastWriteTimeUtc.ToString('o')) $File.Name)) }
     if (-not $skipped) {
         if ($classCount -le 3 -and $state.NestedJars -ge 1) { $findings.Add((New-Finding 'medium' 'bypass' 'Hollow shell: almost no classes, wraps another jar' "$classCount classes + $($state.NestedJars) nested jar(s)" $File.Name)) }
         try {
@@ -3717,7 +3723,7 @@ function Find-StrayModJars($KnownPaths) {
         if (-not (Test-Path -LiteralPath $r)) { continue }
         $depth = 2
         if ($r -match '(?i)\.minecraft|instances|\\mods$') { $depth = 1 }
-        $cands = @(Get-ChildItem -LiteralPath $r -File -Recurse -Depth $depth -Filter '*.jar' -ErrorAction SilentlyContinue |
+        $cands = @(Get-ChildItem -LiteralPath $r -File -Force -Recurse -Depth $depth -Filter '*.jar' -ErrorAction SilentlyContinue |
             Where-Object { $_.Length -gt 2KB -and $_.Length -lt 80MB -and $_.LastWriteTimeUtc -gt $cut -and -not $KnownPaths.ContainsKey($_.FullName) } | Select-Object -First 150)
         foreach ($fi in $cands) {
             $isMod = $false
@@ -5711,11 +5717,23 @@ function Invoke-Main {
         $line = '  folder: ' + (Hide-User $f) + '   [' + $lab.Text + ']'
         if ($lab.Running) { Write-Line ($line + '   <-- RUNNING INSTANCE') Green } else { Write-Line $line DarkGray }
     }
+    foreach ($f in $folders) {
+        try {
+            $fd = Get-Item -LiteralPath $f -Force -ErrorAction Stop
+            if ($fd.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                $tg = ''; try { $tg = (@($fd.Target) -join ', ') } catch {}
+                Add-Sys 'medium' 'bypass' 'Mods folder is a junction or symbolic link (it may point somewhere else)' ((Hide-User $f) + ' -> ' + (Hide-User $tg)) $fd.LastWriteTimeUtc 'mods folder'
+            }
+            if (($fd.Attributes -band [IO.FileAttributes]::Hidden) -or ($fd.Attributes -band [IO.FileAttributes]::System)) {
+                Add-Sys 'medium' 'bypass' 'Mods folder is hidden with the Hidden/System attribute' (Hide-User $f) $fd.LastWriteTimeUtc 'mods folder'
+            }
+        } catch {}
+    }
 
     $jarExt = '.jar', '.disabled', '.old', '.bak'
     $items = New-Object System.Collections.Generic.List[object]
     foreach ($f in $folders) {
-        foreach ($fi in @(Get-ChildItem -LiteralPath $f -File -Force -Recurse -Depth 2 -ErrorAction SilentlyContinue)) { [void]$items.Add($fi) }
+        foreach ($fi in @(Get-ChildItem -LiteralPath $f -File -Force -Recurse -Depth 3 -ErrorAction SilentlyContinue)) { [void]$items.Add($fi) }
     }
     $seen = @{}
     $uniq = New-Object System.Collections.Generic.List[object]
@@ -5796,6 +5814,11 @@ function Invoke-Main {
 
     $script:AiJob = $null
 
+    foreach ($o in $others) {
+        if (($o.Attributes -band [IO.FileAttributes]::Hidden) -and $o.Name -notmatch '(?i)^(desktop\.ini|thumbs\.db|\.ds_store)$') {
+            Add-Sys 'medium' 'bypass' 'Hidden file inside a mods folder' (Hide-User $o.FullName) $o.LastWriteTimeUtc 'mods folder'
+        }
+    }
     foreach ($o in $others) {
         $isZip = $false
         if ($o.Length -ge 1024 -and $o.Length -le 200MB -and $o.Extension.ToLower() -notin '.zip', '.json', '.toml', '.cfg', '.properties', '.txt', '.md', '.log', '.png', '.jpg', '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.scr', '.lnk') { $isZip = Test-ZipMagic $o.FullName }
