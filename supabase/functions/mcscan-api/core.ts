@@ -461,9 +461,10 @@ const AI_FETCH_TIMEOUT_MS = 110_000;
 const SHA256_RX = /^[0-9a-f]{64}$/i;
 
 export function isUnknownMod(m: { class?: string | null; modrinth?: unknown }): boolean {
-  if (m.modrinth) return false;
   const cls = String(m.class || 'CLEAN').toUpperCase();
-  return cls === 'CLEAN' || cls === 'SUSPICIOUS';
+  if (cls === 'CHEAT' || cls === 'MALWARE') return true;
+  if (m.modrinth) return false;
+  return cls === 'CLEAN' || cls === 'SUSPICIOUS' || cls === 'UNKNOWN';
 }
 
 const LIB_ROOT_RX = /^(kotlin|kotlinx|org\/jetbrains|org\/spongepowered|com\/google|org\/apache|org\/objectweb|org\/lwjgl|net\/fabricmc|net\/minecraftforge|net\/neoforged|net\/minecraft|com\/mojang|org\/slf4j|org\/yaml|com\/electronwill|org\/intellij|org\/jspecify|javax|com\/llamalad7|io\/netty|it\/unimi|me\/shedaniel|org\/joml|com\/fasterxml|org\/json|com\/typesafe|org\/checkerframework|org\/jline|META-INF|assets|data|\(root\))/i;
