@@ -90,7 +90,37 @@ const store: Store = {
   async listScans(limit, verdict) {
     let q = db.from('v_scan_overview').select('*').limit(limit);
     if (verdict) q = q.eq('verdict', verdict);
-    return must(await q) ?? [];
+    const rows = (must(await q) ?? []) as any[];
+    const ids = rows.map((r) => r.id).filter(Boolean);
+    if (ids.length) {
+      const x = await db.from('scans').select('id, category, ai_status, acc:meta->minecraftAccounts, ovr:meta->adminOverride, tgt:meta->scanTarget').in('id', ids);
+      if (!x.error && Array.isArray(x.data)) {
+        const by = new Map((x.data as any[]).map((r) => [r.id, r]));
+        for (const r of rows) {
+          const e = by.get(r.id);
+          if (!e) continue;
+          const a = e.acc && typeof e.acc === 'object' ? e.acc : {};
+          r.category = r.category ?? e.category ?? null;
+          r.ai_status = r.ai_status ?? e.ai_status ?? null;
+          r.account = typeof a.currentAccountName === 'string' ? a.currentAccountName : null;
+          r.alts = Array.isArray(a.alternateAccounts) ? a.alternateAccounts.slice(0, 20) : [];
+          r.override = e.ovr && typeof e.ovr === 'object' ? e.ovr : null;
+          r.target = e.tgt && typeof e.tgt === 'object' ? { launcher: e.tgt.launcher ?? null, instance: e.tgt.instance ?? null } : null;
+          if (!r.player && r.account) r.player = r.account;
+        }
+      }
+    }
+    return rows;
+  },
+  async updateScanAdmin(id, patch) {
+    const cur = await db.from('scans').select('meta').eq('id', id).maybeSingle();
+    if (cur.error || !cur.data) return false;
+    const meta = cur.data.meta && typeof cur.data.meta === 'object' ? cur.data.meta : {};
+    const upd: Record<string, unknown> = { meta: { ...meta, adminOverride: patch.override ?? null } };
+    if (patch.category) upd.category = patch.category;
+    if (typeof patch.threat_score === 'number') upd.threat_score = patch.threat_score;
+    const r = await db.from('scans').update(upd).eq('id', id).select('id');
+    return !r.error && (r.data?.length ?? 0) > 0;
   },
   async getScan(id) {
     const scan = (await db.from('scans').select('*').eq('id', id).maybeSingle()).data;
