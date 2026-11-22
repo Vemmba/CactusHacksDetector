@@ -1,6 +1,6 @@
-# Minecraft Hack Detector
+# Cactus Hack Detector
 
-**Minecraft Hack Detector** is a free Windows Minecraft hack detector and security scanner designed to identify suspicious Minecraft mods, hacked clients, cheat modules, and potential malware indicators.
+**Cactus Hack Detector** is a free Windows Minecraft hack detector and security scanner designed to identify suspicious Minecraft mods, hacked clients, cheat modules, and potential malware indicators.
 
 Whether you're investigating a suspicious Minecraft mod, checking for hacked clients, or auditing a Minecraft installation, MC Scan helps identify suspicious files and system activity and generates a detailed JSON scan report.
 
