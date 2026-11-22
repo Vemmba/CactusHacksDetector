@@ -58,6 +58,8 @@ namespace CactusHacksDetector
     public class ClassInfo
     {
         public bool Ok; public string Error; public int Major; public string ThisClass; public int BadCode;
+        public string SuperClass; public int StrTotal; public int EncStr; public int DecryptRefs;
+        public List<string> EncSamples = new List<string>();
         public List<string> Strings = new List<string>();
         public List<string> Caps = new List<string>();
         public List<KeyPair> Keys = new List<KeyPair>();
@@ -124,19 +126,28 @@ namespace CactusHacksDetector
                 }
                 p += 2;
                 int thisIdx = U2(b, p); p += 2;
-                p += 2;
+                int superIdx = U2(b, p); p += 2;
                 ci.ThisClass = pool.ClassName(thisIdx);
+                try { if (superIdx > 0 && superIdx < n) ci.SuperClass = pool.ClassName(superIdx); } catch (Exception) { ci.SuperClass = null; }
                 int ic = U2(b, p); p += 2 + 2 * ic;
                 HashSet<string> caps = new HashSet<string>();
                 for (int i = 1; i < n; i++)
                 {
                     int tg = pool.Tag[i];
-                    if (tg == 8) { if (ci.Strings.Count < 4000) ci.Strings.Add(pool.Utf[pool.A[i]]); }
+                    if (tg == 8)
+                    {
+                        string sv = pool.Utf[pool.A[i]];
+                        if (sv == null) sv = "";
+                        if (ci.Strings.Count < 4000) ci.Strings.Add(sv);
+                        ci.StrTotal++;
+                        if (LooksEncrypted(sv)) { ci.EncStr++; if (ci.EncSamples.Count < 3) ci.EncSamples.Add(Printable(sv)); }
+                    }
                     else if (tg == 9 || tg == 10 || tg == 11)
                     {
                         string o, nm, d;
                         pool.Member(i, out o, out nm, out d);
                         AddCaps(caps, o, nm);
+                        if (tg == 10 && o == ci.ThisClass && IsDecryptDesc(d)) ci.DecryptRefs++;
                     }
                 }
                 ci.Caps.AddRange(caps);
@@ -167,6 +178,33 @@ namespace CactusHacksDetector
             catch (Exception ex) { ci.Error = "parse error: " + ex.Message; }
             return ci;
         }
+        private static bool LooksEncrypted(string s)
+        {
+            if (s == null || s.Length < 6) return false;
+            int odd = 0;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\t' || c == '\n' || c == '\r') continue;
+                if (char.IsControl(c) || c == (char)0xFFFD || (c >= (char)0xE000 && c <= (char)0xF8FF)) odd++;
+            }
+            return odd * 4 >= s.Length;
+        }
+        private static string Printable(string s)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < s.Length && i < 24; i++)
+            {
+                char c = s[i];
+                if (c >= 32 && c < 127) sb.Append(c); else sb.Append("\\u").Append(((int)c).ToString("x4"));
+            }
+            return sb.ToString();
+        }
+        private static bool IsDecryptDesc(string d)
+        {
+            return d == "(Ljava/lang/String;)Ljava/lang/String;" || d == "(II)Ljava/lang/String;" || d == "(I)Ljava/lang/String;" || d == "([B)Ljava/lang/String;"
+                || d == "([C)Ljava/lang/String;" || d == "(Ljava/lang/String;I)Ljava/lang/String;" || d == "(J)Ljava/lang/String;" || d == "(IJ)Ljava/lang/String;";
+        }
         private static void AddCaps(HashSet<string> caps, string o, string nm)
         {
             if (o == "java/lang/Runtime" && nm == "exec") caps.Add("exec");
@@ -183,7 +221,7 @@ namespace CactusHacksDetector
             }
             if (o == "java/lang/System" && (nm == "load" || nm == "loadLibrary")) caps.Add("native-load");
             if (o.StartsWith("com/sun/jna")) caps.Add("jna");
-            if (o.StartsWith("java/net/Socket") || o.StartsWith("java/net/URL") || o.StartsWith("java/net/HttpURLConnection")
+            if (o.StartsWith("java/net/Socket") || (o.StartsWith("java/net/URL") && o != "java/net/URLClassLoader") || o.StartsWith("java/net/HttpURLConnection")
                 || o.StartsWith("java/net/http/HttpClient") || o.StartsWith("javax/net/ssl")) caps.Add("net");
             if (o == "java/net/ServerSocket") caps.Add("listen");
             if (o == "sun/misc/Unsafe" || o == "jdk/internal/misc/Unsafe") caps.Add("unsafe");
@@ -196,6 +234,11 @@ namespace CactusHacksDetector
             if (o.StartsWith("org/lwjgl/input/Keyboard")) caps.Add("lwjgl2");
             if (o.StartsWith("org/lwjgl/glfw/GLFW") || o.StartsWith("com/mojang/blaze3d/platform/InputConstants")
                 || o.StartsWith("net/minecraft/client/util/InputUtil")) caps.Add("glfw");
+            if (nm == "getResourceAsStream" && (o == "java/lang/Class" || o == "java/lang/ClassLoader")) caps.Add("resource-read");
+            if (nm == "defineHiddenClass") caps.Add("classdef");
+            if (o.StartsWith("com/sun/tools/attach")) caps.Add("attach");
+            if (o.StartsWith("java/lang/instrument")) caps.Add("instrument");
+            if (o == "org/spongepowered/asm/mixin/Mixins" && nm == "addConfiguration") caps.Add("mixin-dyn");
         }
         private static List<Ev> Trim(List<Ev> ev, int idx)
         {
@@ -453,8 +496,10 @@ namespace CactusHacksDetector
             public List<string> Strings = new List<string>();
             public List<string> MixinTargets = new List<string>();
             public List<string> Injects = new List<string>();
+            public List<string> Refs = new List<string>();
             public HashSet<string> Flags = new HashSet<string>();
         }
+        private class Slot { public string Name; public HashSet<string> Flags; public string[] Refs; public bool Pvp; public bool Click; }
         private class Pool
         {
             public int[] Tag; public int[] A; public int[] C; public string[] Utf;
@@ -475,6 +520,14 @@ namespace CactusHacksDetector
         private readonly Dictionary<string, int> capScore = new Dictionary<string, int>();
         private readonly Dictionary<string, string> capText = new Dictionary<string, string>();
         private readonly Dictionary<string, string[]> behaviors = new Dictionary<string, string[]>();
+        private readonly List<Slot> slots = new List<Slot>();
+        private readonly Dictionary<string, int> refCount = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> famCount = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> famStrong = new Dictionary<string, int>();
+        private readonly Dictionary<string, List<string>> famEx = new Dictionary<string, List<string>>();
+        private readonly HashSet<string> ownNames = new HashSet<string>();
+        private readonly List<string> mixinNames = new List<string>();
+        private static readonly string[] ActionFlags = new string[] { "attackEntity", "interactEntity", "setRotation", "movePacket", "interactPacket", "clickSlot", "clickPacket", "swapSlot", "setVelocity", "setOnGround", "swingPacket", "actionPacket", "setSprinting", "robot", "nativeHook", "depthOff", "offhandSwap", "stepHeight" };
         private int total; private int shortNames; private int junkNames; private int enc; private int mappedCount; private int failed;
 
         private static readonly string[] VocabSub = new string[] {
@@ -498,7 +551,8 @@ namespace CactusHacksDetector
             new string[] { "(?i)(getTargetingMargin|method_5871)", "Hooks the entity targeting margin with a mixin (hitbox expansion behaviour)", "attackEntity,crosshair,entityHitResult,entityQuery" },
             new string[] { "(?i)(sendImmediately|sendInternal|channelRead0)", "Hooks the packet send and receive path with a mixin (blink / fake lag / packet cancel behaviour)", "movePacket,interactPacket,swingPacket;timing,random,setKeyPressed" },
             new string[] { "(?i)(shouldSlowDown|method_6115)", "Hooks the item-use slowdown with a mixin (no slow behaviour)", "movePacket,setVelocity;setSprinting" },
-            new string[] { "(?i)(handleAttack|doAttack|method_1536)", "Hooks the attack action with a mixin (auto attack / criticals / combo behaviour)", "attackEntity;crosshair,entityHitResult,random;timing,random,attackCooldown" }
+            new string[] { "(?i)(handleAttack|doAttack|method_1536)", "Hooks the attack action with a mixin (auto attack / criticals / combo behaviour)", "attackEntity;crosshair,entityHitResult,random;timing,random,attackCooldown" },
+            new string[] { "(?i)(sendMovementPackets|method_3136|updateWalkingPlayer)", "Hooks the movement-packet send with a mixin while computing rotations (silent aim / rotation spoof behaviour)", "atan2;setRotation,movePacket" }
         };
         private static readonly Dictionary<string, string> Inter = BuildInter();
         private static Dictionary<string, string> BuildInter()
@@ -570,8 +624,19 @@ namespace CactusHacksDetector
             if (ret == "Ljava/util/List;" && (args.IndexOf("/AABB;", StringComparison.Ordinal) >= 0 || args.IndexOf("/Box;", StringComparison.Ordinal) >= 0 || args.IndexOf("/class_238;", StringComparison.Ordinal) >= 0)
                 && (args.IndexOf("Ljava/lang/Class;", StringComparison.Ordinal) >= 0 || args.IndexOf("/Entity;", StringComparison.Ordinal) >= 0 || args.IndexOf("/class_1297;", StringComparison.Ordinal) >= 0 || args.IndexOf("TypeFilter;", StringComparison.Ordinal) >= 0 || args.IndexOf("EntityTypeTest;", StringComparison.Ordinal) >= 0 || args.IndexOf("class_5575;", StringComparison.Ordinal) >= 0)) fl.Add("entityQuery");
         }
+        private static bool External(string c)
+        {
+            return c.StartsWith("java/", StringComparison.Ordinal) || c.StartsWith("javax/", StringComparison.Ordinal) || c.StartsWith("net/minecraft/", StringComparison.Ordinal)
+                || c.StartsWith("com/mojang/", StringComparison.Ordinal) || c.StartsWith("org/lwjgl/", StringComparison.Ordinal) || c.StartsWith("org/spongepowered/", StringComparison.Ordinal)
+                || c.StartsWith("net/fabricmc/", StringComparison.Ordinal) || c.StartsWith("net/minecraftforge/", StringComparison.Ordinal) || c.StartsWith("net/neoforged/", StringComparison.Ordinal)
+                || c.StartsWith("com/google/", StringComparison.Ordinal) || c.StartsWith("org/apache/", StringComparison.Ordinal) || c.StartsWith("it/unimi/", StringComparison.Ordinal)
+                || c.StartsWith("kotlin/", StringComparison.Ordinal) || c.StartsWith("org/joml/", StringComparison.Ordinal) || c.StartsWith("io/netty/", StringComparison.Ordinal)
+                || c.StartsWith("org/slf4j/", StringComparison.Ordinal) || c.StartsWith("org/objectweb/", StringComparison.Ordinal);
+        }
         private static void NoteField(string o, string n, HashSet<string> fl)
         {
+            if (n == "SWAP_ITEM_WITH_OFFHAND" || n == "SWAP_HELD_ITEMS") { fl.Add("offhandSwap"); return; }
+            if (n == "stepHeight" || n == "maxUpStep" || n == "field_5013" || n == "f_19793_" || n == "STEP_HEIGHT" || n == "GENERIC_STEP_HEIGHT") { fl.Add("stepHeight"); return; }
             bool client = o.EndsWith("/MinecraftClient", StringComparison.Ordinal) || o.EndsWith("/Minecraft", StringComparison.Ordinal) || HasId(o, "class_310");
             if (client && (n == "crosshairTarget" || n == "hitResult" || n == "field_1765" || n == "f_91077_" || n == "crosshairPickEntity" || n == "targetedEntity" || n == "field_1692" || n == "f_91076_")) { fl.Add("crosshair"); return; }
             bool inv = o.EndsWith("/PlayerInventory", StringComparison.Ordinal) || o.EndsWith("/Inventory", StringComparison.Ordinal) || HasId(o, "class_1661");
@@ -897,7 +962,15 @@ namespace CactusHacksDetector
                     if (s.Length > 0 && ps.Strings.Count < 3000) ps.Strings.Add(s);
                     if (s.Length > 8 && s.Length < 80 && (s.IndexOf("interaction_range", StringComparison.Ordinal) >= 0 || s.IndexOf("attack_range", StringComparison.Ordinal) >= 0 || s.IndexOf("attack_reach", StringComparison.Ordinal) >= 0)) ps.Flags.Add("reachAttr");
                 }
-                else if (tg == 7) { string c = pool.ClassName(i); if (c.Length > 0) NoteClass(c, ps.Flags); }
+                else if (tg == 7)
+                {
+                    string c = pool.ClassName(i);
+                    if (c.Length > 0)
+                    {
+                        NoteClass(c, ps.Flags);
+                        if (ps.Refs.Count < 150 && c[0] != '[' && c != ps.This && !External(c)) ps.Refs.Add(c);
+                    }
+                }
             }
             try
             {
@@ -1119,8 +1192,37 @@ namespace CactusHacksDetector
                 capScore[name] = capW;
                 capText[name] = string.Join(",", capKeep.ToArray());
             }
-            Evaluate(fl2, name, hintPvp, hintClick, ps.IsMixin);
+            Evaluate(fl2, name, hintPvp, hintClick, ps.IsMixin, behaviors);
+            Track(ps, name, hintPvp, hintClick);
             return true;
+        }
+        private void Track(Parsed ps, string name, bool pvp, bool click)
+        {
+            if (ownNames.Count < 40000) ownNames.Add(name);
+            if (ps.IsMixin) { if (mixinNames.Count < 600) mixinNames.Add(name); return; }
+            for (int i = 0; i < ps.Refs.Count; i++) { if (refCount.Count < 30000 || refCount.ContainsKey(ps.Refs[i])) Bump(refCount, ps.Refs[i], 1); }
+            int real = 0; int act = 0;
+            foreach (string k in ps.Flags)
+            {
+                if (k == "mcMethodRef" || k == "reachConst") continue;
+                real++;
+                if (Array.IndexOf(ActionFlags, k) >= 0) act++;
+            }
+            string sup = ps.Super;
+            if (sup != null && sup.Length > 0 && sup != "java/lang/Object" && (famCount.ContainsKey(sup) || famCount.Count < 5000))
+            {
+                Bump(famCount, sup, 1);
+                if (act >= 2)
+                {
+                    Bump(famStrong, sup, 1);
+                    List<string> ex;
+                    if (!famEx.TryGetValue(sup, out ex)) { ex = new List<string>(); famEx[sup] = ex; }
+                    if (ex.Count < 4) ex.Add(Simple(name));
+                }
+            }
+            if (real == 0 || slots.Count >= 6000) return;
+            Slot sl = new Slot(); sl.Name = name; sl.Flags = ps.Flags; sl.Refs = ps.Refs.ToArray(); sl.Pvp = pvp; sl.Click = click;
+            slots.Add(sl);
         }
         private void AddNameOnly(string name)
         {
@@ -1131,62 +1233,66 @@ namespace CactusHacksDetector
             string key = seg.Length > 4 ? string.Join("/", seg, 0, 4) : pk;
             Bump(pkgs, key, 1);
         }
-        private void Evaluate(HashSet<string> f, string cls, bool hintPvp, bool hintClick, bool mixin)
+        private void Evaluate(HashSet<string> f, string cls, bool hintPvp, bool hintClick, bool mixin, Dictionary<string, string[]> sink)
         {
             bool timing = f.Contains("clock") || f.Contains("sleep");
             bool rnd = f.Contains("random") || f.Contains("gaussian");
             bool target = f.Contains("entityQuery") || f.Contains("raycast");
             if (f.Contains("attackEntity") && target && (timing || rnd || f.Contains("attackCooldown")))
-                AddBehavior(behaviors, "Attacks entities from code with its own targeting and timing (aura / triggerbot behaviour)", cls);
+                AddBehavior(sink, "Attacks entities from code with its own targeting and timing (aura / triggerbot behaviour)", cls);
             if (f.Contains("setRotation") && f.Contains("atan2") && (target || f.Contains("eyePos") || f.Contains("lookVec")))
-                AddBehavior(behaviors, "Computes the angle to a target and rotates the player (aim assist / aimbot behaviour)", cls);
+                AddBehavior(sink, "Computes the angle to a target and rotates the player (aim assist / aimbot behaviour)", cls);
             if (f.Contains("movePacket") && f.Contains("sendPacket") && (f.Contains("setVelocity") || f.Contains("setPos") || f.Contains("setOnGround")))
-                AddBehavior(behaviors, "Sends its own movement packets while moving the player (fly / nofall / blink / phase behaviour)", cls);
+                AddBehavior(sink, "Sends its own movement packets while moving the player (fly / nofall / blink / phase behaviour)", cls);
             if (f.Contains("interactPacket") && f.Contains("sendPacket") && target)
-                AddBehavior(behaviors, "Sends attack/interact packets by hand (reach / aura / criticals behaviour)", cls);
+                AddBehavior(sink, "Sends attack/interact packets by hand (reach / aura / criticals behaviour)", cls);
             if ((f.Contains("clickSlot") || f.Contains("clickPacket")) && (timing || rnd) && hintPvp)
-                AddBehavior(behaviors, "Moves inventory items by code with timed delays (auto totem / auto armor / inventory macro behaviour)", cls);
+                AddBehavior(sink, "Moves inventory items by code with timed delays (auto totem / auto armor / inventory macro behaviour)", cls);
             if (f.Contains("depthOff") && f.Contains("entityQuery") && f.Contains("boundingBox"))
-                AddBehavior(behaviors, "Draws boxes over entities with depth testing off (ESP / wallhack behaviour)", cls);
+                AddBehavior(sink, "Draws boxes over entities with depth testing off (ESP / wallhack behaviour)", cls);
             else if (f.Contains("renderEvent") && f.Contains("entityQuery") && f.Contains("boundingBox") && f.Contains("eyePos"))
-                AddBehavior(behaviors, "Draws lines/boxes to entities from the eye position (ESP / tracer behaviour)", cls);
+                AddBehavior(sink, "Draws lines/boxes to entities from the eye position (ESP / tracer behaviour)", cls);
             if ((f.Contains("robot") || f.Contains("glfwInput") || f.Contains("nativeHook") || f.Contains("setKeyPressed")) && rnd && timing && hintClick)
-                AddBehavior(behaviors, "Generates input on its own with random delays (autoclicker / jitter / macro behaviour)", cls);
+                AddBehavior(sink, "Generates input on its own with random delays (autoclicker / jitter / macro behaviour)", cls);
             bool slot = f.Contains("swapSlot") || f.Contains("slotPacket") || f.Contains("slotField");
             bool cross = f.Contains("crosshair");
             bool timed = timing || rnd || f.Contains("attackCooldown") || f.Contains("tickEvent");
             if (slot && f.Contains("attackEntity"))
-                AddBehavior(behaviors, "Switches hotbar slot and attacks in one class (weapon swap / mace swap behaviour)", cls);
+                AddBehavior(sink, "Switches hotbar slot and attacks in one class (weapon swap / mace swap behaviour)", cls);
             else if (slot && f.Contains("weaponItem") && (target || cross || f.Contains("attackCooldown")))
-                AddBehavior(behaviors, "Picks a weapon item and switches the hotbar slot around attacks (auto weapon / auto swap behaviour)", cls);
+                AddBehavior(sink, "Picks a weapon item and switches the hotbar slot around attacks (auto weapon / auto swap behaviour)", cls);
             else if (f.Contains("slotPacket") && f.Contains("sendPacket") && (cross || target))
-                AddBehavior(behaviors, "Sends hotbar slot packets while targeting entities (silent swap / mace swap behaviour)", cls);
+                AddBehavior(sink, "Sends hotbar slot packets while targeting entities (silent swap / mace swap behaviour)", cls);
             if (f.Contains("attackEntity") && cross && f.Contains("entityHitResult") && timed)
-                AddBehavior(behaviors, "Reads the entity under the crosshair and attacks it from code (triggerbot behaviour)", cls);
+                AddBehavior(sink, "Reads the entity under the crosshair and attacks it from code (triggerbot behaviour)", cls);
             if ((f.Contains("attackEntity") || f.Contains("interactPacket")) && f.Contains("distCheck") && f.Contains("reachConst") && target)
-                AddBehavior(behaviors, "Attacks entities using its own distance limit above vanilla reach (reach behaviour)", cls);
+                AddBehavior(sink, "Attacks entities using its own distance limit above vanilla reach (reach behaviour)", cls);
             if (f.Contains("reachAttr") && f.Contains("attributeMod"))
-                AddBehavior(behaviors, "Changes the player's reach attribute from code (reach behaviour)", cls);
+                AddBehavior(sink, "Changes the player's reach attribute from code (reach behaviour)", cls);
             if (mixin && f.Contains("reachDistance"))
-                AddBehavior(behaviors, "Hooks the interaction/reach distance (reach behaviour)", cls);
+                AddBehavior(sink, "Hooks the interaction/reach distance (reach behaviour)", cls);
             if (f.Contains("useItem") && f.Contains("setRotation") && slot && timed && !mixin)
-                AddBehavior(behaviors, "Places blocks while rotating and switching hotbar slots on a timer (scaffold / tower behaviour)", cls);
+                AddBehavior(sink, "Places blocks while rotating and switching hotbar slots on a timer (scaffold / tower behaviour)", cls);
             if (f.Contains("actionPacket") && f.Contains("sendPacket") && timed && !mixin)
-                AddBehavior(behaviors, "Sends block-break action packets by hand on a timer (nuker / fast break / packet mine behaviour)", cls);
+                AddBehavior(sink, "Sends block-break action packets by hand on a timer (nuker / fast break / packet mine behaviour)", cls);
             if (f.Contains("movePacket") && f.Contains("sendPacket") && f.Contains("attackEntity"))
-                AddBehavior(behaviors, "Sends position packets around attacks (criticals behaviour)", cls);
+                AddBehavior(sink, "Sends position packets around attacks (criticals behaviour)", cls);
             if (f.Contains("setSprinting") && f.Contains("attackEntity") && (f.Contains("commandPacket") || f.Contains("setKeyPressed")))
-                AddBehavior(behaviors, "Toggles sprint around attacks (W-tap / sprint reset behaviour)", cls);
+                AddBehavior(sink, "Toggles sprint around attacks (W-tap / sprint reset behaviour)", cls);
             if (f.Contains("attackEntity") && target && f.Contains("useItem") && hintPvp)
-                AddBehavior(behaviors, "Places and attacks crystals or anchors from code (auto crystal / anchor aura behaviour)", cls);
+                AddBehavior(sink, "Places and attacks crystals or anchors from code (auto crystal / anchor aura behaviour)", cls);
             if (f.Contains("useItem") && slot && hintPvp && timed && !f.Contains("attackEntity"))
-                AddBehavior(behaviors, "Switches hotbar slots and uses items on a timer (auto pearl / firework / potion / totem macro behaviour)", cls);
+                AddBehavior(sink, "Switches hotbar slots and uses items on a timer (auto pearl / firework / potion / totem macro behaviour)", cls);
             if (f.Contains("setVelocity") && f.Contains("lookVec") && f.Contains("tickEvent") && !mixin)
-                AddBehavior(behaviors, "Sets the player's velocity along the view direction every tick (fly / speed / boost behaviour)", cls);
+                AddBehavior(sink, "Sets the player's velocity along the view direction every tick (fly / speed / boost behaviour)", cls);
             if ((f.Contains("clickSlot") || f.Contains("clickPacket")) && rnd && timing && !hintPvp)
-                AddBehavior(behaviors, "Clicks container slots by code with random delays (chest stealer / inventory manager behaviour)", cls);
+                AddBehavior(sink, "Clicks container slots by code with random delays (chest stealer / inventory manager behaviour)", cls);
             if (f.Contains("setRotation") && target && rnd && timed && !mixin)
-                AddBehavior(behaviors, "Rotates toward targets with random smoothing (aim assist / humanized aim behaviour)", cls);
+                AddBehavior(sink, "Rotates toward targets with random smoothing (aim assist / humanized aim behaviour)", cls);
+            if (f.Contains("offhandSwap") && f.Contains("sendPacket") && (timed || rnd) && !mixin)
+                AddBehavior(sink, "Swaps the off-hand item by packet on a timer (auto totem / offhand macro behaviour)", cls);
+            if (f.Contains("stepHeight") && f.Contains("tickEvent") && !mixin)
+                AddBehavior(sink, "Changes the player's step height every tick (step behaviour)", cls);
         }
 
         public void AddLang(string text)
@@ -1225,6 +1331,59 @@ namespace CactusHacksDetector
             foreach (KeyValuePair<string, int> kv in o.capScore) { if (!capScore.ContainsKey(kv.Key) && capScore.Count < 3000) { capScore[kv.Key] = kv.Value; capText[kv.Key] = o.capText[kv.Key]; } }
         }
 
+        private Dictionary<string, string[]> CrossClass()
+        {
+            Dictionary<string, string[]> found = new Dictionary<string, string[]>();
+            if (slots.Count < 2) return found;
+            Dictionary<string, Slot> byName = new Dictionary<string, Slot>();
+            for (int i = 0; i < slots.Count; i++) { if (!byName.ContainsKey(slots[i].Name)) byName[slots[i].Name] = slots[i]; }
+            int budget = 4000;
+            for (int i = 0; i < slots.Count && budget > 0; i++)
+            {
+                Slot a = slots[i];
+                if (a.Refs.Length == 0) continue;
+                budget--;
+                HashSet<string> u = new HashSet<string>(a.Flags);
+                bool pvp = a.Pvp; bool click = a.Click;
+                List<string> used = new List<string>();
+                for (int r = 0; r < a.Refs.Length && used.Count < 6; r++)
+                {
+                    Slot h;
+                    if (!byName.TryGetValue(a.Refs[r], out h) || object.ReferenceEquals(h, a)) continue;
+                    int rc;
+                    if (refCount.TryGetValue(h.Name, out rc) && rc > 15) continue;
+                    foreach (string k in h.Flags) u.Add(k);
+                    if (h.Pvp) pvp = true;
+                    if (h.Click) click = true;
+                    used.Add(Simple(h.Name));
+                }
+                if (used.Count == 0) continue;
+                Dictionary<string, string[]> tmp = new Dictionary<string, string[]>();
+                Evaluate(u, a.Name, pvp, click, false, tmp);
+                foreach (KeyValuePair<string, string[]> kv in tmp)
+                {
+                    if (behaviors.ContainsKey(kv.Key) || found.ContainsKey(kv.Key)) continue;
+                    found[kv.Key] = new string[] { Simple(a.Name) + " + " + string.Join(" + ", used.ToArray()), "1" };
+                }
+            }
+            return found;
+        }
+        public List<string[]> Hierarchy()
+        {
+            List<string[]> res = new List<string[]>();
+            foreach (KeyValuePair<string, int> kv in famCount)
+            {
+                if (kv.Value < 8 || !ownNames.Contains(kv.Key)) continue;
+                int st;
+                if (!famStrong.TryGetValue(kv.Key, out st) || st < 3) continue;
+                List<string> ex;
+                famEx.TryGetValue(kv.Key, out ex);
+                res.Add(new string[] { Simple(kv.Key), kv.Value.ToString(), st.ToString(), ex == null ? "" : string.Join(", ", ex.ToArray()) });
+                if (res.Count >= 3) break;
+            }
+            return res;
+        }
+        public string[] MixinNames() { return mixinNames.ToArray(); }
         public int Total { get { return total; } }
         public int VocabCount { get { return vocab.Count; } }
         public int MappedCount { get { return mappedCount; } }
@@ -1238,6 +1397,12 @@ namespace CactusHacksDetector
                 int n = int.Parse(kv.Value[1]);
                 string detail = kv.Value[0] + (n > 1 ? " (+" + (n - 1) + " more)" : "");
                 res.Add(new string[] { kv.Key, detail });
+            }
+            int cxn = 0;
+            foreach (KeyValuePair<string, string[]> cx in CrossClass())
+            {
+                if (cxn++ >= 4) break;
+                res.Add(new string[] { cx.Key, cx.Value[0] + " (behaviour split across classes)" });
             }
             Regex kb = new Regex("(?i)(velocity|knockback|takeknockback|applyknockback|deltamovement)");
             Regex reach = new Regex("(?i)(getreachdistance|interactionrange|reachdistance|getattackrange|extendreach|entityreach|updatetargetedentity|method_3190|method_2904|method_55754|method_55755)");
@@ -1651,6 +1816,7 @@ $Sig = @{
         @{ Rule='On-chain C2 (blockchain RPC)'; Sev='medium'; Rx='(?i)eth_call|bsc-dataseed|infura\.io|polygon-rpc|rpc\.ankr\.com' }
         @{ Rule='Java agent / boot-classpath hook'; Sev='medium'; Rx='(?i)Premain-Class|Launcher-Agent-Class|Agent-Class|Can-Retransform-Classes|Boot-Class-Path' }
         @{ Rule='Manifest loads an external jar'; Sev='medium'; Rx='(?i)Class-Path:\s*(https?:|[A-Za-z]:[\\/]|/)' }
+        @{ Rule='Legacy tweaker / core plugin (runs before the game)'; Sev='low'; Rx='(?i)(FMLCorePlugin|TweakClass)\s*:\s*\S+' }
     )
 
     FakeIds = @('sodium','lithium','iris','fabric-api','fabric','modmenu','optifine','starlight','phosphor','ferritecore','entityculling','indium','lazydfu','krypton','memoryleakfix','c2me-fabric','smoothboot-fabric','immediatelyfast','noisium','threadtweak')
@@ -2173,6 +2339,20 @@ function Test-DllBytes($Bytes, [string]$Where, $Findings) {
 $script:NameSev = @{ Clients = 'high'; Markers = 'high'; Bypass = 'high'; Modules = 'medium'; Libs = 'medium'; Obfuscators = 'medium' }
 $script:NameCat = @{ Clients = 'cheat-name'; Markers = 'cheat-name'; Bypass = 'cheat-name'; Modules = 'cheat-name'; Libs = 'library'; Obfuscators = 'obfuscation' }
 
+function Scan-HiddenArchive($Entry, [string]$Where, [int]$Depth, $State, $Findings) {
+    if ($Depth -ge 3 -or $Entry.Length -gt 40MB) { return }
+    $hb = Read-EntryBytes $Entry 40MB
+    if (-not $hb) { return }
+    try {
+        $hz = New-Object IO.Compression.ZipArchive((New-Object IO.MemoryStream(, $hb)), 'Read')
+        $hs = Scan-Archive $hz $Where ($Depth + 1) $State
+        foreach ($hf in $hs.Findings) { $Findings.Add($hf) }
+        [void]$State.Nested.Add([pscustomobject]@{ File = (Limit-Text $Where 100); Classes = [int]$hs.ClassCount; Id = $null })
+        $State.NestedJars++
+        $hz.Dispose()
+    } catch {}
+}
+
 function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
     $findings = New-Object System.Collections.Generic.List[object]
     $classNames = New-Object System.Collections.Generic.List[string]
@@ -2190,6 +2370,11 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
     $resNames = New-Object System.Collections.Generic.List[string]
     $moduleDirs = @{}
     $moduleCount = 0
+    $encClasses = New-Object System.Collections.Generic.List[string]
+    $encTotal = 0; $encDec = 0
+    $mixCfg = New-Object System.Collections.Generic.List[object]
+    $mixDyn = $false
+    $libRx = '^(org/objectweb/|org/spongepowered/|net/fabricmc/|net/minecraftforge/|net/neoforged/|cpw/mods/|org/quiltmc/|kotlin/|kotlinx/|org/jetbrains/|org/apache/|com/google/|javassist/|org/codehaus/|org/luaj/|org/graalvm/|org/mozilla/|groovy/|scala/|io/netty/|org/slf4j/|org/yaml/|org/joml/|it/unimi/|com/mojang/|net/minecraft/|me/shedaniel/|dev/architectury/|com/electronwill/|org/h2/|org/sqlite/|com/zaxxer/|com/github/benmanes/|org/bouncycastle/|org/tukaani/|com/fasterxml/)'
 
     foreach ($metaName in 'fabric.mod.json', 'META-INF/jarjar/metadata.json') {
         $me = $Zip.GetEntry($metaName)
@@ -2235,6 +2420,9 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
             if ($Rx.ModulesWeakLeaf.IsMatch($base)) { $weak[$base.ToLower()] = $name }
             if ($name -match '(?i)/modules?/(combat|movement|exploit|ghost|fight|motion|legit)/([^/$]+?)(\$.*)?\.class$') { Add-Hack $State $Matches[2] $Matches[1] "class in modules/$($Matches[1])/" 'class' }
         }
+        if (($name -match '(?i)^META-INF/services/(cpw\.mods\.modlauncher\.|net\.minecraftforge\.forgespi\.|net\.neoforged\.neoforgespi\.|net\.neoforged\.fml\.)') -or $name -ieq 'META-INF/coremods.json') {
+            if (-not $seen['svc']) { $seen['svc'] = $true; $findings.Add((New-Finding 'low' 'bypass' 'Loader service / coremod entry (code that runs before mods load)' $name $where)) }
+        }
         if ($name -match '(?i)(^|/)(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.[^/]*)?(/|$)') {
             if (-not $seen['devname']) { $seen['devname'] = $true; $findings.Add((New-Finding 'medium' 'obfuscation' 'Reserved Windows device name used as a file/class name' $name $where)) }
         }
@@ -2250,9 +2438,10 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
         }
 
         if ($ext -eq '.jar') {
-            if ($Depth -ge 3) { $findings.Add((New-Finding 'low' 'bypass' 'Nested archive too deep to scan' $name $where)); continue }
+            if ($Depth -ge 3) { $findings.Add((New-Finding 'medium' 'bypass' 'Nested archive too deep to scan (jar inside jar inside jar inside jar)' $name $where)); continue }
             $isNestDir = ($name -like 'META-INF/jars/*') -or ($name -like 'META-INF/jarjar/*')
             $nb = Read-EntryBytes $e 40MB
+            if (-not $nb -and $e.Length -gt 40MB) { $findings.Add((New-Finding 'medium' 'bypass' 'Nested jar larger than 40 MB was not scanned' ("{0} MB" -f [math]::Round($e.Length / 1MB)) $where)) }
             if ($nb) {
                 try {
                     $nz = New-Object IO.Compression.ZipArchive((New-Object IO.MemoryStream(, $nb)), 'Read')
@@ -2293,9 +2482,10 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
                     $got = $st.Read($head, 0, 4); $st.Dispose()
                     if ($got -eq 4) {
                         if ($head[0] -eq 0x4D -and $head[1] -eq 0x5A) { $findings.Add((New-Finding 'high' 'bypass' 'Windows executable disguised as a resource' $name $where)) }
-                        elseif ($head[0] -eq 0xCA -and $head[1] -eq 0xFE -and $head[2] -eq 0xBA -and $head[3] -eq 0xBE -and $name -notmatch '(?i)(^|/)DebugProbesKt\.bin$') { $findings.Add((New-Finding 'high' 'bypass' 'Java class disguised as a resource' $name $where)) }
+                        elseif ($head[0] -eq 0xCA -and $head[1] -eq 0xFE -and $head[2] -eq 0xBA -and $head[3] -eq 0xBE -and $name -notmatch '(?i)(^|/)DebugProbesKt\.bin$') { $findings.Add((New-Finding 'high' 'bypass' 'Java class disguised as a resource' $name $where)); $dcb = Read-EntryBytes $e 4MB; if ($dcb -and $pb) { [void]$pb.AddClass($dcb, $name) } }
                         elseif ($head[0] -eq 0x50 -and $head[1] -eq 0x4B -and $head[2] -eq 0x03 -and $head[3] -eq 0x04 -and $ext -in '.png', '.jpg', '.jpeg', '.gif', '.ogg', '.wav', '.mp3', '.txt', '.lang', '.dat', '.bin', '.ico', '.bmp') {
                             $findings.Add((New-Finding 'high' 'bypass' 'Archive/jar disguised as a resource' $name $where))
+                            Scan-HiddenArchive $e $where $Depth $State $findings
                         }
                     }
                 } catch {}
@@ -2312,9 +2502,32 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
         }
 
         $bytes = Read-EntryBytes $e
-        if (-not $bytes) { continue }
+        if (-not $bytes) {
+            if ($isClass -and $e.Length -gt 12MB -and -not $seen['bigclass']) { $seen['bigclass'] = $true; $findings.Add((New-Finding 'medium' 'bypass' 'Oversized class file skipped by the scanner (padding to avoid analysis)' ("{0} MB" -f [math]::Round($e.Length / 1MB)) $where)) }
+            continue
+        }
         $State.BytesScanned += $bytes.Length
         $text = $Latin1.GetString($bytes)
+        if (-not $isClass -and $bytes.Length -ge 4) {
+            if ($bytes[0] -eq 0x50 -and $bytes[1] -eq 0x4B -and $bytes[2] -eq 3 -and $bytes[3] -eq 4) {
+                $findings.Add((New-Finding 'high' 'bypass' 'Archive/jar disguised as a text or config file' $name $where))
+                Scan-HiddenArchive $e $where $Depth $State $findings
+            } elseif ($bytes[0] -eq 0xCA -and $bytes[1] -eq 0xFE -and $bytes[2] -eq 0xBA -and $bytes[3] -eq 0xBE) {
+                $findings.Add((New-Finding 'high' 'bypass' 'Java class disguised as a text or config file' $name $where))
+                if ($pb) { [void]$pb.AddClass($bytes, $name) }
+            }
+        }
+        if ($ext -eq '.json' -and $mixCfg.Count -lt 12 -and $bytes.Length -lt 2MB -and (($name -match '(?i)(^|/)[^/]*mixins?[^/]*\.json$' -and $name -notmatch '(?i)refmap') -or $name -notmatch '/') -and $text -match '"package"\s*:' -and $text -match '"(mixins|client|server)"\s*:\s*\[') {
+            try {
+                $mj = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json -ErrorAction Stop
+                if ($mj -and $mj.package) {
+                    $mxPk = ([string]$mj.package).Replace('.', '/')
+                    $mxDecl = New-Object System.Collections.Generic.List[string]
+                    foreach ($mxGrp in 'mixins', 'client', 'server') { foreach ($mxn in @($mj.$mxGrp)) { if ($mxn) { $mxDecl.Add(($mxPk + '/' + ([string]$mxn).Replace('.', '/'))) } } }
+                    [void]$mixCfg.Add([pscustomobject]@{ File = $name; Names = @($mxDecl); Plugin = [string]$mj.plugin })
+                }
+            } catch {}
+        }
         if ($pb -and $Depth -eq 0 -and $langDone -lt 2 -and $ext -eq '.json' -and $name -match '(?i)^assets/[^/]+/lang/[a-z_]+\.json$') { $langDone++; $pb.AddLang([Text.Encoding]::UTF8.GetString($bytes)) }
 
         foreach ($mr in $MalwareRx) {
@@ -2354,9 +2567,10 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
             Add-Hack $State $decoded 'hidden label' "fullwidth label in $name" 'string'
         }
 
-        if ($isClass -and $pb -and $profCount -lt 8000) { $profCount++; [void]$pb.AddClass($bytes, $name) }
+        if ($isClass -and $State.ClassesParsed -ge 20000 -and -not $seen['clslimit']) { $seen['clslimit'] = $true; $findings.Add((New-Finding 'low' 'bypass' 'Class analysis limit reached, remaining classes were not analysed (possible padding)' '20000+ classes' $Label)) }
+        if ($isClass -and $pb -and $profCount -lt 20000) { $profCount++; [void]$pb.AddClass($bytes, $name) }
 
-        if ($isClass -and $script:Native -and $State.ClassesParsed -lt 8000) {
+        if ($isClass -and $script:Native -and $State.ClassesParsed -lt 20000) {
             $State.ClassesParsed++
             $ci = [CactusHacksDetector.ClassAnalyzer]::Analyze($bytes)
             if ($ci.Ok) {
@@ -2371,9 +2585,75 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
                 if ($caps['robot-screen'] -and -not $seen['c-rs']) { $seen['c-rs'] = $true; $findings.Add((New-Finding 'medium' 'cheat-behavior' 'Takes screenshots via java.awt.Robot' $ci.ThisClass $where)) }
                 if ($caps['jnativehook'] -and -not $seen['c-nh']) { $seen['c-nh'] = $true; $findings.Add((New-Finding 'medium' 'library' 'Global keyboard/mouse hook library (jnativehook)' $ci.ThisClass $where)) }
                 if ($caps['glfw-callback'] -and -not $seen['c-glfw']) { $seen['c-glfw'] = $true; $findings.Add((New-Finding 'low' 'behavior' 'Installs raw GLFW input callbacks' $ci.ThisClass $where)) }
+                if ($ci.StrTotal -ge 3 -and $ci.EncStr -ge 3 -and ($ci.EncStr * 2) -ge $ci.StrTotal) {
+                    $encTotal++
+                    $encSample = ''
+                    if ($ci.EncSamples.Count -gt 0) { $encSample = $ci.EncSamples[0] }
+                    if ($encClasses.Count -lt 200) { $encClasses.Add(("{0} ({1}/{2} strings, e.g. '{3}')" -f $ci.ThisClass, $ci.EncStr, $ci.StrTotal, $encSample)) }
+                    if ($ci.DecryptRefs -ge 1) { $encDec++ }
+                }
+                $ldr = ($ci.SuperClass -eq 'java/lang/ClassLoader' -or $ci.SuperClass -eq 'java/net/URLClassLoader' -or $ci.SuperClass -eq 'java/security/SecureClassLoader')
+                if ($ldr -or $caps['classdef'] -or $caps['attach'] -or $caps['instrument'] -or $caps['mixin-dyn']) {
+                    if ($ci.ThisClass -notmatch $libRx) {
+                        $capList = (@($ci.Caps) | Sort-Object) -join ','
+                        if ($ldr -and -not $seen['c-ldr']) {
+                            $seen['c-ldr'] = $true
+                            $lsev = 'low'
+                            if ($caps['resource-read'] -or $caps['b64'] -or $caps['cipher'] -or $caps['inflate'] -or $caps['net']) { $lsev = 'medium' }
+                            $findings.Add((New-Finding $lsev 'bypass' 'Custom ClassLoader subclass (can load code that is not visible in the jar)' ("{0} extends {1} [{2}]" -f $ci.ThisClass, $ci.SuperClass, $capList) $where))
+                        }
+                        if ($caps['classdef'] -and $caps['resource-read'] -and -not $seen['c-resdef']) {
+                            $seen['c-resdef'] = $true
+                            $findings.Add((New-Finding 'medium' 'bypass' 'Reads a packed resource and defines classes from it (hidden payload loader)' ("{0} [{1}]" -f $ci.ThisClass, $capList) $where))
+                        }
+                        if ($caps['classdef'] -and $caps['net'] -and -not $seen['c-netdef']) {
+                            $seen['c-netdef'] = $true
+                            $findings.Add((New-Finding 'medium' 'bypass' 'Loads classes dynamically and uses URLs or sockets in the same class (possible remote code loader)' ("{0} [{1}]" -f $ci.ThisClass, $capList) $where))
+                        }
+                        if (($caps['attach'] -or $caps['instrument']) -and -not $seen['c-agent']) {
+                            $seen['c-agent'] = $true
+                            $findings.Add((New-Finding 'medium' 'bypass' 'Attaches a Java agent or instruments classes at runtime' ("{0} [{1}]" -f $ci.ThisClass, $capList) $where))
+                        }
+                        if ($caps['mixin-dyn']) { $mixDyn = $true }
+                    }
+                }
                 foreach ($kp in $ci.Keys) {
                     [void]$State.Keys.Add([pscustomobject]@{ Name = $kp.Name; Key = $kp.Key; Owner = $kp.Owner; Major = $ci.Major; Caps = @($ci.Caps); Class = $ci.ThisClass })
                 }
+            }
+        }
+    }
+
+    if ($encTotal -ge 3) {
+        $esev = 'low'
+        if ($encTotal -ge 6 -and $encDec -ge 3) { $esev = 'medium' }
+        $findings.Add((New-Finding $esev 'obfuscation' 'String encryption: constants are stored as unreadable text' ("{0} classes ({1} with a string decryptor method), e.g. {2}" -f $encTotal, $encDec, ((@($encClasses) | Select-Object -First 3) -join '; ')) $Label))
+    }
+
+    if ($pb) {
+        $mxNames = @($pb.MixinNames())
+        if ($mixCfg.Count -gt 0 -or $mxNames.Count -gt 0) {
+            $classSet = @{}
+            foreach ($cn in $classNames) { $classSet[$cn] = $true }
+            $declAll = @{}
+            $missingMx = New-Object System.Collections.Generic.List[string]
+            $plugins = New-Object System.Collections.Generic.List[string]
+            foreach ($mcfg in $mixCfg) {
+                foreach ($dn in $mcfg.Names) { $declAll[$dn] = $true; if (-not $classSet.ContainsKey($dn)) { $missingMx.Add($dn) } }
+                if ($mcfg.Plugin) { $plugins.Add($mcfg.Plugin) }
+            }
+            $undecl = @($mxNames | Where-Object { -not $declAll.ContainsKey($_) })
+            if ($missingMx.Count -ge 1) {
+                $msev = 'low'
+                if ($missingMx.Count -ge 3) { $msev = 'medium' }
+                $findings.Add((New-Finding $msev 'bypass' 'Mixin config lists classes that are not in the jar (code may be loaded from elsewhere)' ("{0} missing, e.g. {1}" -f $missingMx.Count, ((@($missingMx) | Select-Object -First 3) -join ', ')) $Label))
+            }
+            if ($undecl.Count -ge 1) {
+                $usev = 'low'
+                $plugTxt = ''
+                if ($plugins.Count -gt 0) { $plugTxt = '; mixin plugin ' + $plugins[0] }
+                if ($plugins.Count -gt 0 -or $mixDyn) { $usev = 'medium' }
+                $findings.Add((New-Finding $usev 'bypass' 'Mixin classes that no mixin config declares (hidden or dynamically registered mixins)' ("{0} undeclared, e.g. {1}{2}" -f $undecl.Count, ((@($undecl) | Select-Object -First 3) -join ', '), $plugTxt) $Label))
             }
         }
     }
@@ -2389,10 +2669,19 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
     }
 
     if ($pb) {
+        $behN = 0; $behCombat = 0
         foreach ($bh in $pb.Behaviors()) {
+            $behN++
+            if ([string]$bh[0] -match '(?i)aura|triggerbot|reach|aim|velocity|knockback|criticals|swap|crystal|anchor|hitbox') { $behCombat++ }
             $findings.Add((New-Finding 'medium' 'cheat-behavior' $bh[0] (Limit-Text $bh[1] 160) $Label))
             $bn = [regex]::Match([string]$bh[0], '\(([^()]+?) behaviour\)\s*$')
             if ($bn.Success) { Add-Hack $State (($bn.Groups[1].Value -replace '\s*/\s*', '/') + ' (behaviour)') '' ([string]$bh[0]) 'behavior' }
+        }
+        if ($encTotal -ge 3 -and $behN -ge 1 -and $behCombat -ge 1) {
+            $findings.Add((New-Finding 'high' 'cheat-behavior' 'Cheat behaviour in code whose strings are encrypted (module names are hidden)' ("{0} classes with encrypted strings and {1} cheat behaviour(s)" -f $encTotal, $behN) $Label))
+        }
+        foreach ($hh in $pb.Hierarchy()) {
+            $findings.Add((New-Finding 'medium' 'cheat-behavior' 'Module-style class hierarchy using attack, rotation, packet or inventory APIs (works with renamed classes)' ("{0} classes extend {1}, {2} of them use such APIs: {3}" -f $hh[1], $hh[0], $hh[2], $hh[3]) $Label))
         }
         $vt = @($pb.VocabTerms())
         if ($vt.Count -ge 3) {
@@ -2520,8 +2809,29 @@ function Get-ModMeta($Zip) {
         if ($t -match '"version"\s*:\s*"([^"]+)"') { $meta.Version = $Matches[1] }
         if ($t -match '"name"\s*:\s*"([^"]+)"') { $meta.Name = $Matches[1] }
         if ($t -match '"description"\s*:\s*"([^"]+)"') { $meta.Description = Limit-Text $Matches[1] 240 }
+        try {
+            $qj = $t | ConvertFrom-Json -ErrorAction Stop
+            $ql = $qj.quilt_loader
+            if ($ql -and $ql.metadata) {
+                if ($ql.metadata.contributors) { $meta.Authors = @($ql.metadata.contributors.PSObject.Properties.Name | Select-Object -First 6) }
+                if ($ql.metadata.contact -and $ql.metadata.contact.homepage) { $meta.Homepage = Limit-Text ([string]$ql.metadata.contact.homepage) 120 }
+            }
+            if ($ql -and $ql.entrypoints) {
+                $qe = New-Object System.Collections.Generic.List[string]
+                foreach ($pr in $ql.entrypoints.PSObject.Properties) {
+                    foreach ($v in @($pr.Value)) {
+                        $sv = $null
+                        if ($v -is [string]) { $sv = $v } elseif ($v -and $v.value) { $sv = [string]$v.value }
+                        if ($sv) { $qe.Add(('{0}:{1}' -f $pr.Name, $sv)) }
+                    }
+                }
+                $meta.Entrypoints = @($qe | Select-Object -First 10)
+            }
+            if ($qj.mixin) { $meta.MixinConfigs = @(@($qj.mixin) | ForEach-Object { if ($_ -is [string]) { $_ } elseif ($_ -and $_.config) { [string]$_.config } } | Where-Object { $_ } | Select-Object -First 8) }
+            if ($ql -and $ql.depends) { $meta.Depends = @(@($ql.depends) | ForEach-Object { if ($_ -is [string]) { $_ } elseif ($_ -and $_.id) { [string]$_.id } } | Where-Object { $_ } | Select-Object -First 15) }
+        } catch {}
     } elseif ($toml) {
-        $t = & $read $toml; $meta.Loader = 'forge/neoforge'
+        $t = & $read $toml; $meta.Loader = 'forge/neoforge'; if ($Zip.GetEntry('META-INF/neoforge.mods.toml') -and -not $Zip.GetEntry('META-INF/mods.toml')) { $meta.Loader = 'neoforge' }
         if ($t -match 'modId\s*=\s*"([^"]+)"') { $meta.Id = $Matches[1] }
         if ($t -match 'displayName\s*=\s*"([^"]+)"') { $meta.Name = $Matches[1] }
         if ($t -match '(?m)^\s*version\s*=\s*"([^"]+)"') { $meta.Version = $Matches[1] }
