@@ -2037,7 +2037,6 @@ $SuspectMods = [ordered]@{
     'healthindicators' = 'Health Indicators'
     'healthindicator' = 'Health Indicators'
     'neat' = 'Neat'
-    'bettermounthud' = 'Better Mount HUD'
     'cpscounter' = 'CPS Counter'
     'cpsdisplay' = 'CPS Counter'
     'keystrokes' = 'Keystrokes'
@@ -2057,7 +2056,6 @@ $SuspectMods = [ordered]@{
     'frostbytesimprovedinventory' = 'Frostbyte''s Improved Inventory'
     'invmove' = 'InvMove'
     'betterscreens' = 'Better Screens'
-    'fullbright' = 'Fullbright'
     'nightvision' = 'Night Vision'
     'lightoverlay' = 'Light Overlay'
     'viafabric' = 'ViaFabric'
@@ -2375,6 +2373,28 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
     $mixCfg = New-Object System.Collections.Generic.List[object]
     $mixDyn = $false
     $libRx = '^(org/objectweb/|org/spongepowered/|net/fabricmc/|net/minecraftforge/|net/neoforged/|cpw/mods/|org/quiltmc/|kotlin/|kotlinx/|org/jetbrains/|org/apache/|com/google/|javassist/|org/codehaus/|org/luaj/|org/graalvm/|org/mozilla/|groovy/|scala/|io/netty/|org/slf4j/|org/yaml/|org/joml/|it/unimi/|com/mojang/|net/minecraft/|me/shedaniel/|dev/architectury/|com/electronwill/|org/h2/|org/sqlite/|com/zaxxer/|com/github/benmanes/|org/bouncycastle/|org/tukaani/|com/fasterxml/)'
+
+    $platform = $false
+    $hackKeysBefore = @($State.Hacks.Keys)
+    foreach ($pmName in 'fabric.mod.json', 'quilt.mod.json') {
+        $pme = $Zip.GetEntry($pmName)
+        if ($pme -and -not $platform) {
+            $pmb = Read-EntryBytes $pme 1MB
+            if ($pmb) {
+                $pmt = [Text.Encoding]::UTF8.GetString($pmb)
+                if ($pmt -match '"id"\s*:\s*"([^"]+)"') {
+                    $pid2 = $Matches[1]
+                    if ($pid2 -match '^(fabric-[a-z0-9-]+-v\d+|fabric-api|fabric-api-base|fabric-loader|fabricloader|quilted_fabric_api|qsl|quilt_loader|quilt_[a-z_]+)$') {
+                        $platform = $true
+                        foreach ($pe in $Zip.Entries) {
+                            $pn = $pe.FullName
+                            if ($pn.EndsWith('.class') -and -not $pn.StartsWith('META-INF/') -and $pn -notmatch '^(net/fabricmc/|org/quiltmc/)') { $platform = $false; break }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     foreach ($metaName in 'fabric.mod.json', 'META-INF/jarjar/metadata.json') {
         $me = $Zip.GetEntry($metaName)
@@ -2721,6 +2741,13 @@ function Scan-Archive($Zip, [string]$Label, [int]$Depth, $State) {
                 $findings.Add((New-Finding 'low' 'bypass' 'A few classes use a different Java version than the rest' ("{0} class(es) with class-file version {1}" -f $majors[$mj], $mj) $Label))
             }
         }
+    }
+
+    if ($platform) {
+        for ($fi = $findings.Count - 1; $fi -ge 0; $fi--) {
+            if ($findings[$fi].Category -in 'cheat-name', 'cheat-string', 'cheat-behavior', 'obfuscation', 'library') { $findings.RemoveAt($fi) }
+        }
+        foreach ($hk in @($State.Hacks.Keys)) { if ($hackKeysBefore -notcontains $hk) { $State.Hacks.Remove($hk) } }
     }
 
     [pscustomobject]@{ Findings = $findings; ClassCount = $classNames.Count; Prof = $pb; Res = $resNames }
