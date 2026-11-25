@@ -3273,8 +3273,12 @@ function Find-LiveGameDir($StartUtc) {
 
 function Find-ModFolders {
     $roots = New-Object System.Collections.Generic.List[string]
-    foreach ($sm in @(Get-StaticModFolders)) { $roots.Add($sm) }
-    foreach ($ri in @(Get-RunningInstances)) { if ($ri.ModsDir) { $roots.Add($ri.ModsDir) } }
+    if ($script:TargetInstance) {
+        if ($script:TargetInstance.ModsDir) { $roots.Add($script:TargetInstance.ModsDir) }
+    } else {
+        foreach ($sm in @(Get-StaticModFolders)) { $roots.Add($sm) }
+        foreach ($ri in @(Get-RunningInstances)) { if ($ri.ModsDir) { $roots.Add($ri.ModsDir) } }
+    }
     foreach ($m in $ModPath) { if ($m) { $roots.Add($m) } }
 
     $roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
@@ -6079,7 +6083,7 @@ function Invoke-Main {
     $jarSet = @{}; foreach ($j in $jars) { $jarSet[$j.FullName] = $true }
     $others = @($uniq | Where-Object { -not $jarSet.ContainsKey($_.FullName) -and $_.Length -gt 0 })
     $strayMap = @{}
-    if (-not $ModsOnly) {
+    if (-not $ModsOnly -and -not $script:TargetInstance) {
         $script:StrayJars = @()
         Invoke-Module 'Mod jars outside the mods folders' { $script:StrayJars = @(Find-StrayModJars $jarSet) }
         foreach ($sj in @($script:StrayJars)) {
@@ -6182,7 +6186,10 @@ function Invoke-Main {
     Write-Host '  PHASE 2/3 -- game files, keybinds, logs and running Minecraft' -ForegroundColor Cyan
     $gameDirs = New-Object System.Collections.Generic.List[string]
     foreach ($f in $folders) { $pd = Split-Path -Parent $f; if ($pd -and -not $gameDirs.Contains($pd)) { $gameDirs.Add($pd) } }
-    if ($env:APPDATA) { $dm = Join-Path $env:APPDATA '.minecraft'; if ((Test-Path -LiteralPath $dm) -and -not $gameDirs.Contains($dm)) { $gameDirs.Add($dm) } }
+    if ($script:TargetInstance) {$tg = $script:TargetInstance.GameDir
+    if ($tg -and -not $gameDirs.Contains($tg)) { $gameDirs.Add($tg) }} elseif ($env:APPDATA) {
+        $dm = Join-Path $env:APPDATA '.minecraft'
+    if ((Test-Path -LiteralPath $dm) -and -not $gameDirs.Contains($dm)) { $gameDirs.Add($dm) }}
     $known = @{}
     foreach ($m in $mods) { if ($m.ModId) { $known[([string]$m.ModId).ToLower()] = $true } }
     Invoke-Module 'Game folders (options, logs, client traces)' {
